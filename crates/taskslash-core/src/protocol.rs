@@ -5,8 +5,10 @@
 //! `recorded` once the run's row is written. An EOF before `exited` ends the job as dropped, and its
 //! row has no exit code.
 //!
-//! A query: the client sends `history`; the daemon answers `runs` and closes.
+//! A query: the client sends `history`; the daemon answers `runs` and closes. Or it sends
+//! `status`; the daemon answers `status` (the machine's latest snapshot and the running jobs).
 
+use crate::sampler::MachineSnapshot;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
@@ -25,6 +27,8 @@ pub enum ClientMessage {
     Exited { job: u64, code: i32 },
     /// Ask for the recorded runs of `key`, newest first.
     History { key: String },
+    /// Ask what the machine and the running jobs are doing.
+    Status,
 }
 
 /// How the client runs a job's command.
@@ -60,6 +64,8 @@ pub enum DaemonMessage {
     Recorded { job: u64 },
     /// The answer to `history`: at most 20 runs, newest first.
     Runs { runs: Vec<Run> },
+    /// The answer to `status`.
+    Status(Box<Status>),
     /// The request was refused; the daemon closes the connection after this.
     Error { message: String },
 }
@@ -82,6 +88,34 @@ pub struct Run {
     pub written_bytes: Option<i64>,
     /// `None` when the client went away before reporting how the command ended.
     pub exit_code: Option<i32>,
+}
+
+/// What the machine and the running jobs are doing, as `taskslash status --json` prints it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Status {
+    pub machine: MachineSnapshot,
+    /// The running jobs, oldest first.
+    pub jobs: Vec<JobStatus>,
+}
+
+/// A running job and the last live reading of it. The reading is `None` before its first one, and
+/// always on the plain launch path (nothing measures it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobStatus {
+    pub job: u64,
+    pub key: String,
+    /// RFC 3339, UTC.
+    pub started_at: String,
+    pub cpu_threads: Option<f64>,
+    pub mem_mib: Option<u64>,
+}
+
+/// `status` as the one line of JSON `taskslash status --json` prints, with its newline.
+pub fn status_json(status: Status) -> String {
+    let mut text =
+        serde_json::to_string(&DaemonMessage::Status(Box::new(status))).unwrap_or_default();
+    text.push('\n');
+    text
 }
 
 /// `runs` as a pretty JSON array and a newline, as `taskslash history --json` prints it.

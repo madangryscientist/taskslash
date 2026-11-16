@@ -1,10 +1,10 @@
 //! The client side: `taskslash run` asks the daemon for a job, runs the command as this process's
 //! child the way the daemon says, reports how it ended, and returns its exit code;
-//! `taskslash history` asks for a key's recorded runs.
+//! `taskslash history` asks for a key's recorded runs, and `taskslash status` for what is running.
 
 use crate::Error;
 use crate::launch;
-use crate::protocol::{ClientMessage, DaemonMessage, Launch, Run, receive, send};
+use crate::protocol::{ClientMessage, DaemonMessage, Launch, Run, Status, receive, send};
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, BufReader};
@@ -111,6 +111,15 @@ pub fn history(socket: &Path, key: &str) -> Result<Vec<Run>, Error> {
         key: key.to_owned(),
     })? {
         DaemonMessage::Runs { runs } => Ok(runs),
+        other => Err(Error::new(format!("unexpected reply {other:?}"))),
+    }
+}
+
+/// What the machine and the running jobs are doing, from the daemon's latest readings.
+pub fn status(socket: &Path) -> Result<Status, Error> {
+    let mut daemon = Connection::open(socket)?;
+    match daemon.ask(&ClientMessage::Status)? {
+        DaemonMessage::Status(status) => Ok(*status),
         other => Err(Error::new(format!("unexpected reply {other:?}"))),
     }
 }

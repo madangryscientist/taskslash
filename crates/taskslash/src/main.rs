@@ -1,14 +1,15 @@
 //! The `taskslash` command line: argv only, over `taskslash-core`.
 //!
 //! Exit codes: 0 ok, 1 a failure that is not usage, 2 a usage error. `taskslash run` exits with
-//! its command's code instead. `taskslash history` exits 1 when no daemon is running, as `run` does.
+//! its command's code instead. `taskslash history` and `taskslash status` exit 1 when no daemon is
+//! running, as `run` does.
 
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 use taskslash_core::Error;
-use taskslash_core::protocol::Run;
+use taskslash_core::protocol::{Run, Status};
 
 /// Admission control for builds and tests on this machine.
 #[derive(Parser)]
@@ -45,6 +46,15 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Show what the machine and the running jobs are doing, from the daemon's latest readings.
+    ///
+    /// The machine is sampled once a second (free space on the watched mounts every 30 s). A job
+    /// with no live reading yet, or one run unmeasured, shows `-`, and null with `--json`.
+    Status {
+        /// Print the answer as one line of JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -74,7 +84,69 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
                 .map_err(|e| Error::new(format!("cannot write the runs: {e}")))?;
             Ok(0)
         }
+        Commands::Status { json } => {
+            let status = taskslash_core::status(&socket)?;
+            let text = if json {
+                taskslash_core::protocol::status_json(status)
+            } else {
+                status_text(&status)
+            };
+            write!(io::stdout(), "{text}")
+                .map_err(|e| Error::new(format!("cannot write the status: {e}")))?;
+            Ok(0)
+        }
     }
+}
+
+/// A few lines: CPU, the three `some avg10` pressures, memory, each disk, each mount, each job.
+fn status_text(status: &Status) -> String {
+    let m = &status.machine;
+    let pct = |share: f64| format!("{:.0}%", share * 100.0);
+    let mut out = format!(
+        "cpu       {} busy on {} threads ({} online), load {:.2} {:.2} {:.2}\n",
+        pct(m.cpu.busy),
+        m.cpu.threads,
+        m.cpu.threads_online,
+        m.load[0],
+        m.load[1],
+        m.load[2]
+    );
+    out.push_str(&format!(
+        "pressure  cpu {:.2}  memory {:.2}  io {:.2}  (some avg10, %)\n",
+        m.cpu.pressure.some_avg10, m.memory.pressure.some_avg10, m.io.pressure.some_avg10
+    ));
+    out.push_str(&format!(
+        "memory    {} MiB available of {} MiB, swap {} of {} MiB free\n",
+        m.memory.available_mib, m.memory.total_mib, m.memory.swap_free_mib, m.memory.swap_total_mib
+    ));
+    for disk in &m.io.disks {
+        out.push_str(&format!(
+            "disk      {} {} busy, {:.1} MiB/s written\n",
+            disk.name,
+            pct(disk.busy),
+            disk.write_mib_s
+        ));
+    }
+    for mount in &m.mounts {
+        out.push_str(&format!(
+            "mount     {} {} MiB free of {} MiB ({} used)\n",
+            mount.path,
+            mount.free_mib,
+            mount.total_mib,
+            pct(mount.used)
+        ));
+    }
+    for job in &status.jobs {
+        let cpu = job
+            .cpu_threads
+            .map_or("-".to_owned(), |t| format!("{t:.2}"));
+        let mem = job.mem_mib.map_or("-".to_owned(), |m| m.to_string());
+        out.push_str(&format!(
+            "job {}     {} since {}, {cpu} threads, {mem} MiB\n",
+            job.job, job.key, job.started_at
+        ));
+    }
+    out
 }
 
 /// One header line and one line per run, `-` for a cost that was not measured.

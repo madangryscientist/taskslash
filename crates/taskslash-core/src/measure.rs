@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -47,18 +48,34 @@ pub fn cgroup_dir(unit: &str) -> Option<PathBuf> {
     )))
 }
 
+/// What a running job is using now: its CPU over the last reading, in threads, and its memory.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Live {
+    pub cpu_threads: f64,
+    pub mem_mib: u64,
+}
+
+/// The latest `Live` reading of a job, shared with whoever asks (`taskslash status`).
+pub type LiveReading = Arc<Mutex<Option<Live>>>;
+
 /// A thread reading one job's cgroup every 250 ms until `finish`.
 pub struct Sampler {
     stop: Sender<()>,
     thread: JoinHandle<Cost>,
+    live: LiveReading,
 }
 
 impl Sampler {
     pub fn start(dir: PathBuf) -> Self {
         let (stop, stopped) = mpsc::channel();
+        let live = LiveReading::default();
+        let shared = Arc::clone(&live);
         let thread = thread::spawn(move || {
             let t0 = Instant::now();
-            let mut readings = Readings::default();
+            let mut readings = Readings {
+                live: shared,
+                ..Readings::default()
+            };
             let mut seen = false;
             let mut stopping = false;
             loop {
@@ -78,7 +95,12 @@ impl Sampler {
             }
             readings.cost()
         });
-        Self { stop, thread }
+        Self { stop, thread, live }
+    }
+
+    /// The latest live reading, updated by the sampling thread.
+    pub fn live(&self) -> LiveReading {
+        Arc::clone(&self.live)
     }
 
     /// Stops sampling and returns the last good readings.
@@ -96,6 +118,7 @@ struct Readings {
     cpu: Vec<(f64, u64)>,
     peak_mem: Option<u64>,
     written: Option<u64>,
+    live: LiveReading,
 }
 
 impl Readings {
@@ -110,6 +133,7 @@ impl Readings {
         if let Some(peak) = read(&dir.join("memory.peak")).and_then(|s| s.trim().parse().ok()) {
             self.peak_mem = Some(peak);
         }
+        self.publish(dir);
         if let Some(procs) = read(&dir.join("cgroup.procs")) {
             let alive: BTreeMap<u32, u64> = procs
                 .lines()
@@ -122,6 +146,27 @@ impl Readings {
             self.written = self.written.max(written_bytes([&alive]));
         }
         dir.is_dir()
+    }
+
+    /// Shares what the job uses now: CPU between the last two readings, and `memory.current`.
+    fn publish(&self, dir: &Path) {
+        let [.., (t0, u0), (t1, u1)] = self.cpu[..] else {
+            return;
+        };
+        let Some(current) =
+            read(&dir.join("memory.current")).and_then(|s| s.trim().parse::<u64>().ok())
+        else {
+            return;
+        };
+        let cpu_threads = if t1 > t0 {
+            u1.saturating_sub(u0) as f64 / 1e6 / (t1 - t0)
+        } else {
+            0.0
+        };
+        *self.live.lock().unwrap_or_else(PoisonError::into_inner) = Some(Live {
+            cpu_threads,
+            mem_mib: current >> 20,
+        });
     }
 
     fn cost(&self) -> Cost {
