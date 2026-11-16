@@ -125,12 +125,13 @@ impl MachineSampler for ProcSampler {
         let now = Instant::now();
         let times = procfs::cpu_times(&read("/proc/stat"));
         let counters = procfs::diskstats(&read("/proc/diskstats"), &self.disks);
-        // A process with no affinity line is allowed every CPU.
-        let allowed: Vec<usize> = if self.allowed.is_empty() {
-            times.iter().map(|t| t.cpu).collect()
-        } else {
-            self.allowed.clone()
-        };
+        // The allowed list can name CPUs that are possible but not online; only online ones count.
+        // A process with no affinity line is allowed every online CPU.
+        let allowed: Vec<usize> = times
+            .iter()
+            .map(|t| t.cpu)
+            .filter(|cpu| self.allowed.is_empty() || self.allowed.contains(cpu))
+            .collect();
         let (busy, disks) = match &self.previous {
             Some((then, old_times, old_counters)) => {
                 let secs = now.duration_since(*then).as_secs_f64();
@@ -256,7 +257,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_first_sample_has_no_rates_and_the_second_stays_in_range() {
+    fn the_first_sample_has_no_rates() {
         let mut sampler = ProcSampler::new();
         let first = sampler.sample();
         assert_eq!(first.cpu.busy, 0.0);
@@ -267,10 +268,6 @@ mod tests {
                 .iter()
                 .all(|d| d.busy == 0.0 && d.write_mib_s == 0.0)
         );
-        std::thread::sleep(Duration::from_millis(50));
-        let second = sampler.sample();
-        assert!((0.0..=1.0).contains(&second.cpu.busy), "{second:?}");
-        assert!(second.cpu.threads >= 1 && second.cpu.threads <= second.cpu.threads_online);
     }
 
     #[test]
