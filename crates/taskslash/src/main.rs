@@ -1,32 +1,54 @@
-//! The `taskslash` command line. Exit codes: 0 ok, 2 a usage error.
+//! The `taskslash` command line: argv only, over `taskslash-core`.
+//!
+//! Exit codes: 0 ok, 1 a failure that is not usage, 2 a usage error. `taskslash run` exits with
+//! its command's code instead.
 
+use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 use std::process::ExitCode;
+use taskslash_core::Error;
 
-const USAGE: &str = "usage:
-  taskslash greet <name>   greet someone
-  taskslash --version      print the version
-  taskslash --help         print this help
-";
+/// Admission control for builds and tests on this machine.
+#[derive(Parser)]
+#[command(name = "taskslash", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run the daemon that admits and records jobs. Runs until killed.
+    Daemon,
+    /// Run a command as a job of the daemon.
+    ///
+    /// Exits with the command's exit code (128+N when signal N killed it, 127 when it cannot be
+    /// started). Exits 1 when no daemon is running, which a command's own exit 1 can also mean.
+    Run {
+        /// A name for the job.
+        #[arg(long)]
+        name: Option<String>,
+        /// The command and its arguments.
+        #[arg(required = true, trailing_var_arg = true, value_name = "COMMAND")]
+        command: Vec<OsString>,
+    },
+}
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match args.as_slice() {
-        ["--version" | "-V"] => {
-            println!("taskslash {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
+    let cli = Cli::parse();
+    match dispatch(cli.command) {
+        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Err(e) => {
+            eprintln!("taskslash: {e}");
+            ExitCode::FAILURE
         }
-        ["--help" | "-h"] => {
-            print!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-        ["greet", name] => {
-            println!("{}", taskslash_core::greet(name));
-            ExitCode::SUCCESS
-        }
-        _ => {
-            eprint!("{USAGE}");
-            ExitCode::from(2)
-        }
+    }
+}
+
+fn dispatch(command: Commands) -> Result<i32, Error> {
+    let socket = taskslash_core::socket_path()?;
+    match command {
+        Commands::Daemon => taskslash_core::serve(&socket).map(|()| 0),
+        Commands::Run { name, command } => taskslash_core::run(&socket, name, &command),
     }
 }

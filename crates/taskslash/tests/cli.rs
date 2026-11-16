@@ -16,16 +16,6 @@ fn prints_its_version() {
 }
 
 #[test]
-fn greets_by_name() {
-    let out = run(&["greet", "Ada"]);
-    assert!(out.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "Hello, Ada, from TaskSlash.\n"
-    );
-}
-
-#[test]
 fn a_usage_error_exits_2() {
     let out = run(&["nope"]);
     assert_eq!(out.status.code(), Some(2));

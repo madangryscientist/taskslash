@@ -1,0 +1,9 @@
+[Unit]
+Description=TaskSlash: admission control for builds and tests on this machine
+
+[Service]
+ExecStart=%h/.cargo/bin/taskslash daemon
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

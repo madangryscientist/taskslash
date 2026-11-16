@@ -15,8 +15,8 @@ toolchain, so moon never downloads Bun or runs `bun install`. Keep it that way (
 | Project | Path | What it is |
 | --- | --- | --- |
 | `engine` | `packages/engine` | the engine, a TypeScript library |
-| `core` | `crates/taskslash-core` | the engine, a Rust library |
-| `bin` | `crates/taskslash` | the `taskslash` binary, over `taskslash-core` |
+| `core` | `crates/taskslash-core` | the engine, a Rust library: the socket protocol, the daemon and the `run` client |
+| `bin` | `crates/taskslash` | the `taskslash` binary (argv only, over `taskslash-core`) and its systemd user unit |
 | `scripts` | `scripts` | the repo checks (typecheck and lint only) |
 
 The `gate` job in `.github/workflows/ci.yml` runs these on GitHub-hosted runners (`ubuntu-latest`),
@@ -67,7 +67,9 @@ hardcoded `/tmp`.
 ## Invariants
 
 1. **Exit codes are a contract.** `taskslash` exits 0 on success, 1 when the run failed for a
-   reason that is not usage, 2 on a usage error.
+   reason that is not usage, 2 on a usage error. `taskslash run` exits with its command's code
+   instead (128+N when signal N killed it, 127 when it cannot be started); it exits 1 itself only
+   when it never ran the command (no daemon, a refused job).
 2. **The TypeScript code writes through `process.stdout` / `process.stderr`**, not `console` (the
    lint bans it outside `scripts/`).
 3. **A secret is read from the environment, never from the tree.**
