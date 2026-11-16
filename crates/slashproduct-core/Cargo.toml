@@ -1,0 +1,8 @@
+[package]
+name = "slashproduct-core"
+description = "The SlashProduct engine."
+license = "MIT"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true

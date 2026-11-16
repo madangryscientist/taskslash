@@ -1,0 +1,28 @@
+$schema: "../.moon/cache/schemas/project.json"
+
+tags: ["ts"]
+
+# No Vitest suite here.
+workspace:
+  inheritedTasks:
+    exclude:
+      - "test"
+
+tasks:
+  typecheck:
+    command: "tsc -p scripts/tsconfig.json"
+    options:
+      runFromWorkspaceRoot: true
+  lint:
+    script: "oxlint --type-aware --deny-warnings scripts && bun scripts/check-slop.ts scripts"
+    options:
+      runFromWorkspaceRoot: true
+  # template:begin self-test
+  # The template's own tests: they run scripts/init.ts on copies of the template. init removes them.
+  # Not cached: the tests read the whole template (docs, workflows, crates, apps), which no input
+  # list here would track.
+  test:
+    command: "bun --bun vitest run --config template/vitest.config.ts"
+    options:
+      cache: false
+  # template:end self-test

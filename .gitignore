@@ -1,0 +1,20 @@
+node_modules/
+.moon/cache/
+
+# template:begin cli
+# the npm package's build output
+packages/cli/dist/
+packages/cli/LICENSE
+packages/cli/NOTICE
+packages/cli/*.tgz
+
+# template:end cli
+# template:begin rust
+# cargo's build output
+target/
+
+# template:end rust
+# secrets
+*.pem
+.env
+.dev.vars

@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "slashproduct-web",
+  "compatibility_date": "2025-09-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/server.ts",
+  "observability": { "enabled": true },
+  "upload_source_maps": true,
+  // No route, binding or secret yet. A custom domain, a D1 database (Drizzle, as the other products
+  // use) and the secrets are added with the first feature that needs them.
+}

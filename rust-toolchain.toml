@@ -1,0 +1,5 @@
+# rustup reads this and installs the pinned toolchain: `rustup toolchain install` once on a new
+# machine (CI does it before the gate, since parallel cargo calls would each try to install it).
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]

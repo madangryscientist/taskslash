@@ -1,0 +1,26 @@
+# Inherited by the projects tagged `rust`: the crates in the cargo workspace at the root. Each task
+# runs cargo from the crate's own directory, so cargo picks that crate. The binary depends on the
+# library, so every crate's sources are an input to every rust task. Cache correctness over
+# granularity, as in ts.yml.
+$schema: "../cache/schemas/tasks.json"
+
+inheritedBy:
+  tags: ["rust"]
+
+implicitInputs:
+  - "/Cargo.toml"
+  - "/Cargo.lock"
+  - "/rust-toolchain.toml"
+  - "/crates/**/*"
+  # cargo's own output. Left in, a build would change the hash it is hashed under.
+  - "!/target/**"
+
+tasks:
+  build:
+    command: "cargo build --locked"
+  test:
+    command: "cargo test --locked"
+  lint:
+    command: "cargo clippy --locked --all-targets -- -D warnings"
+  format-check:
+    command: "cargo fmt --check"

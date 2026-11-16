@@ -1,0 +1,30 @@
+$schema: "../../.moon/cache/schemas/project.json"
+
+tags: ["ts"]
+
+# Their tools (tsr, vite, playwright) live in the app's own node_modules/.bin, which moon does not
+# put on PATH, so `bun run` finds them from the app's directory.
+tasks:
+  typecheck:
+    script: "bun run tsr generate && tsc --noEmit"
+  lint:
+    script: "oxlint --type-aware --deny-warnings apps/web && bun scripts/check-slop.ts apps/web"
+    options:
+      runFromWorkspaceRoot: true
+  build:
+    command: "bun run vite build"
+    # The Cloudflare plugin also writes .wrangler/deploy/config.json, the redirect that vite preview
+    # and wrangler deploy read; without it a cache hit restores dist they cannot find.
+    outputs:
+      - "dist"
+      - ".wrangler/deploy"
+  # Its Playwright webServer builds with the e2e env itself, so it has no dependency on `build`.
+  # Cached: the suite runs on localhost against this project's own build, so its result depends on
+  # the inputs alone. `$CI` is an input because it turns on `forbidOnly`. No outputs: a pass leaves
+  # nothing a later step reads, so a hit restores nothing and leaves `dist` as it was.
+  test-e2e:
+    command: "bun run playwright test"
+    # A task's own `inputs` replace the default project glob, so `**/*` is listed again.
+    inputs:
+      - "**/*"
+      - "$CI"

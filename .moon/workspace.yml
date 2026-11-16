@@ -1,0 +1,45 @@
+# moon workspace. Projects are listed, not globbed, and keep their directory's short name, so
+# `bunx moon run scripts:lint` lints the scripts. Each engine is one project, tagged with its
+# language (`ts`, `rust`), and inherits that tag's tasks from `.moon/tasks/<tag>.yml`.
+#
+# No toolchain is declared (no .moon/toolchains.yml): every task runs on the `system` toolchain, so
+# moon runs our bun commands as they are and never downloads Bun or runs `bun install`.
+# The cache lives in .moon/cache (gitignored); moon has no setting to move it.
+$schema: "./cache/schemas/workspace.json"
+
+projects:
+  # template:begin web
+  web: "apps/web"
+  # template:end web
+  # template:begin cli
+  cli: "packages/cli"
+  # template:end cli
+  # template:begin engine
+  engine: "packages/engine"
+  # template:end engine
+  # template:begin rust
+  core: "crates/slashproduct-core"
+  bin: "crates/slashproduct"
+  # template:end rust
+  scripts: "scripts"
+
+vcs:
+  client: "git"
+  defaultBranch: "main"
+
+pipeline:
+  installDependencies: false
+
+telemetry: false
+
+# A shared moon remote cache (bazel-remote over HTTP) behind a bearer token. moon sends
+# `Authorization: Bearer $MOON_REMOTE_TOKEN`; unset or empty sends no header, the host answers 401,
+# and the run carries on with the local cache only. A read token downloads; only CI pushes to main
+# hold the write token. Outside CI moon never uploads.
+remote:
+  api: "http"
+  host: "https://moon-cache.madangryscientist.com"
+  auth:
+    token: "MOON_REMOTE_TOKEN"
+  cache:
+    localReadOnly: true
