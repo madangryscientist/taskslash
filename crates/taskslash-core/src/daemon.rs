@@ -1,27 +1,54 @@
-//! `taskslash daemon`: hands out job ids and records each job's start and end. One thread per
-//! connection; a connection is one job.
+//! `taskslash daemon`: hands out jobs, measures them, and records a row for each when it ends. One
+//! thread per connection; a connection is one job or one query.
 
 use crate::Error;
-use crate::protocol::{ClientMessage, DaemonMessage, receive, send};
+use crate::launch;
+use crate::measure::{self, Cost, Sampler};
+use crate::protocol::{ClientMessage, DaemonMessage, Launch, receive, send};
+use crate::store::{self, Finished, Store};
 use std::fs::{self, DirBuilder};
 use std::io::BufReader;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::Arc;
+use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Instant, SystemTime};
 
-/// Binds the socket at `path` and serves until the process is killed.
-pub fn serve(path: &Path) -> Result<(), Error> {
+/// What every connection shares.
+struct Daemon {
+    launch: Launch,
+    store: Mutex<Store>,
+    next_job: AtomicU64,
+}
+
+/// Binds the socket at `path`, opens the database at `db`, and serves until the process is killed.
+pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
+    let store = Store::open(db)?;
+    // Asked before binding, so a daemon that accepts has already logged its launch path.
+    let launch = launch::probe();
     let listener = bind(path)?;
-    eprintln!("taskslash daemon listening on {}", path.display());
-    let next_job = Arc::new(AtomicU64::new(1));
+    if launch == Launch::Plain {
+        eprintln!("taskslash: no systemd user session, jobs run unmeasured");
+    }
+    eprintln!(
+        "taskslash daemon listening on {} (launch: {}, database: {})",
+        path.display(),
+        launch.as_str(),
+        db.display()
+    );
+    let daemon = Arc::new(Daemon {
+        launch,
+        store: Mutex::new(store),
+        next_job: AtomicU64::new(1),
+    });
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let next_job = Arc::clone(&next_job);
-                thread::spawn(move || serve_job(stream, &next_job));
+                let daemon = Arc::clone(&daemon);
+                thread::spawn(move || daemon.serve_connection(stream));
             }
             Err(e) => eprintln!("taskslash: accept failed: {e}"),
         }
@@ -59,43 +86,103 @@ fn bind(path: &Path) -> Result<UnixListener, Error> {
     UnixListener::bind(path).map_err(|e| Error::new(format!("cannot bind {}: {e}", path.display())))
 }
 
-/// One connection: `submit`, `start`, then `exited` and `recorded`. An EOF or a bad message after
-/// `start` ends the job as dropped.
-fn serve_job(stream: UnixStream, next_job: &AtomicU64) {
-    let Ok(read_half) = stream.try_clone() else {
-        return;
-    };
-    let mut reader = BufReader::new(read_half);
-    let mut writer = stream;
-    let argv = match receive(&mut reader) {
-        // A connection that closes without asking is a probe (the stale check, a readiness wait).
-        Ok(None) => return,
-        Ok(Some(ClientMessage::Submit { argv, .. })) if !argv.is_empty() => argv,
-        Ok(Some(ClientMessage::Submit { .. })) => {
-            return refuse(&mut writer, "submit needs a non-empty argv");
+impl Daemon {
+    fn serve_connection(&self, stream: UnixStream) {
+        let Ok(read_half) = stream.try_clone() else {
+            return;
+        };
+        let mut reader = BufReader::new(read_half);
+        let mut writer = stream;
+        match receive(&mut reader) {
+            // A connection that closes without asking is a probe (the stale check, a readiness wait).
+            Ok(None) => {}
+            Ok(Some(ClientMessage::Submit { name, argv, cwd })) if !argv.is_empty() => {
+                self.serve_job(&mut reader, &mut writer, name.as_deref(), &argv, &cwd);
+            }
+            Ok(Some(ClientMessage::Submit { .. })) => {
+                refuse(&mut writer, "submit needs a non-empty argv");
+            }
+            Ok(Some(ClientMessage::History { key })) => {
+                let reply = match self.store().history(&key) {
+                    Ok(runs) => DaemonMessage::Runs { runs },
+                    Err(e) => DaemonMessage::Error {
+                        message: e.to_string(),
+                    },
+                };
+                let _ = send(&mut writer, &reply);
+            }
+            Ok(Some(ClientMessage::Exited { .. })) => {
+                refuse(&mut writer, "expected submit or history, got exited");
+            }
+            Err(e) => refuse(&mut writer, &format!("bad request: {e}")),
         }
-        Ok(Some(ClientMessage::Exited { .. })) => {
-            return refuse(&mut writer, "expected submit, got exited");
-        }
-        Err(e) => return refuse(&mut writer, &format!("bad request: {e}")),
-    };
-    let job = next_job.fetch_add(1, Ordering::Relaxed);
-    eprintln!("job {job} started: {}", argv.join(" "));
-    let start = DaemonMessage::Start {
-        job,
-        unit: format!("taskslash-job-{job}"),
-    };
-    if send(&mut writer, &start).is_err() {
-        eprintln!("job {job} dropped");
-        return;
     }
-    match receive(&mut reader) {
-        Ok(Some(ClientMessage::Exited { job: id, code })) if id == job => {
-            eprintln!("job {job} exited {code}");
-            // The client may already be gone; the job is recorded either way.
-            let _ = send(&mut writer, &DaemonMessage::Recorded { job });
+
+    /// A job: `start`, sampling while it runs, then a row when `exited` arrives (and `recorded`) or
+    /// when the connection drops (no exit code).
+    fn serve_job(
+        &self,
+        reader: &mut BufReader<UnixStream>,
+        writer: &mut UnixStream,
+        name: Option<&str>,
+        argv: &[String],
+        cwd: &str,
+    ) {
+        let job = self.next_job.fetch_add(1, Ordering::Relaxed);
+        // The daemon's pid keeps unit names apart across restarts and daemons on other sockets.
+        let unit = format!("taskslash-{}-{job}", process::id());
+        eprintln!("job {job} started: {}", argv.join(" "));
+        let started_at = SystemTime::now();
+        let clock = Instant::now();
+        let start = DaemonMessage::Start {
+            job,
+            unit: unit.clone(),
+            launch: self.launch,
+        };
+        let sampler = match self.launch {
+            Launch::Scope => measure::cgroup_dir(&unit).map(Sampler::start),
+            Launch::Plain => None,
+        };
+        let exit_code = if send(writer, &start).is_ok() {
+            match receive(reader) {
+                Ok(Some(ClientMessage::Exited { job: id, code })) if id == job => Some(code),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let wall_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let cost = sampler.map(Sampler::finish).unwrap_or_else(Cost::default);
+        match exit_code {
+            Some(code) => eprintln!("job {job} exited {code}"),
+            None => eprintln!("job {job} dropped"),
         }
-        _ => eprintln!("job {job} dropped"),
+        let key = store::key(name, argv);
+        let finished = Finished {
+            key: &key,
+            argv,
+            cwd,
+            launch: self.launch,
+            started_at,
+            wall_ms,
+            cost,
+            exit_code,
+        };
+        match self.store().record(&finished) {
+            // The client may already be gone; the row is written either way.
+            Ok(_) if exit_code.is_some() => {
+                let _ = send(writer, &DaemonMessage::Recorded { job });
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("taskslash: job {job} not recorded: {e}"),
+        }
+    }
+
+    fn store(&self) -> std::sync::MutexGuard<'_, Store> {
+        // A panic while holding the lock leaves the connection, not the store, broken.
+        self.store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
