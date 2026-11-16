@@ -92,35 +92,37 @@ fn a_run_keeps_the_mean_of_the_samples_taken_while_it_ran() {
 }
 
 #[test]
-fn one_pass_counts_each_job_it_starts_against_the_next() {
-    // 10 threads: an 8.5 thread budget. Two 4.0 jobs fit, a third does not.
+fn an_unmeasured_job_is_not_counted_again_as_unmanaged() {
+    // 10 threads, an 8.5 thread budget. A plain job estimated at 4 threads really uses 4, so the
+    // machine shows 4 busy threads; a second 4 thread job still fits (4 + 4 = 8).
     let mut s = Scheduler::new(Limits::default(), machine());
-    let started: Vec<Receiver<()>> = (1..=3)
-        .map(|id| {
-            let (start, started) = mpsc::channel();
-            let mut estimate = estimate(&[], Kind::Command);
-            estimate.cpu_threads = 4.0;
-            let job = Job {
-                id,
-                key: format!("k{id}"),
-                kind: Kind::Command,
-                estimate,
-                vouched: true,
-            };
-            s.submit(job, start);
-            started
-        })
-        .collect();
-    s.admit(|_| false);
-    assert!(started[0].try_recv().is_ok());
-    assert!(started[1].try_recv().is_ok(), "vouched: not never seen");
-    assert!(started[2].try_recv().is_err());
-    let (reason, _, position) = s.waiting(3).unwrap();
-    assert_eq!(position, 1);
+    let submit4 = |s: &mut Scheduler, id: u64| {
+        let (start, started) = mpsc::channel();
+        let mut estimate = estimate(&[], Kind::Command);
+        estimate.cpu_threads = 4.0;
+        let job = Job {
+            id,
+            key: format!("k{id}"),
+            kind: Kind::Command,
+            estimate,
+            vouched: true,
+        };
+        s.submit(job, start);
+        started
+    };
+    let first = submit4(&mut s, 1);
+    s.admit(|_| true);
+    assert!(first.try_recv().is_ok());
+    let mut busy = machine();
+    busy.cpu.busy = 0.4;
+    for _ in 0..30 {
+        s.sample(&busy);
+    }
+    let second = submit4(&mut s, 2);
+    s.admit(|_| true);
     assert!(
-        reason
-            .to_string()
-            .starts_with("cpu needs 4.0, free 0.5; held by"),
-        "{reason}"
+        second.try_recv().is_ok(),
+        "{:?}",
+        s.waiting(2).map(|w| w.0.to_string())
     );
 }

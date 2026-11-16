@@ -5,7 +5,7 @@
 use crate::admission::{self, Decision, Demand, Limits, Reason, Use};
 use crate::estimate::Estimate;
 use crate::measure::{Live, LiveReading};
-use crate::protocol::Kind;
+use crate::protocol::{JobState, Kind};
 use crate::sampler::MachineSnapshot;
 use crate::store::RunPressure;
 use std::collections::{BTreeMap, VecDeque};
@@ -79,14 +79,6 @@ pub struct Scheduler {
     unmanaged: VecDeque<Use>,
 }
 
-/// Where a job is, as `why` answers.
-pub enum Whereabouts {
-    /// Waiting: its reason, seconds waited and 1-based place in the queue.
-    Waiting(Reason, u64, usize),
-    Running,
-    NotFound,
-}
-
 impl Scheduler {
     pub fn new(limits: Limits, machine: MachineSnapshot) -> Self {
         Self {
@@ -111,17 +103,7 @@ impl Scheduler {
     /// Starts every waiting job, in `order`, that `admission::check` allows, each against the
     /// running set as it grows. `seen` says whether a key has a finished run.
     pub fn admit(&mut self, seen: impl Fn(&str) -> bool) {
-        let mut held: Vec<admission::Running> = self
-            .running
-            .values()
-            .map(|r| admission::Running {
-                job: r.job.id,
-                key: r.job.key.clone(),
-                estimate: reserved(&r.job.estimate),
-                observed: r.live.as_ref().and_then(|l| *lock(l)).map(observed),
-                never_seen: r.unknown,
-            })
-            .collect();
+        let mut held = self.held();
         let unmanaged = self.unmanaged();
         for id in self.order() {
             let Some(at) = self.queue.iter().position(|w| w.job.id == id) else {
@@ -178,15 +160,29 @@ impl Scheduler {
         Some((reason, w.queued_at.elapsed().as_secs(), at + 1))
     }
 
-    /// Where job `id` is.
-    pub fn whereabouts(&self, id: u64) -> Whereabouts {
+    /// Where job `id` is and, when it waits, why, how long and its place in line.
+    pub fn whereabouts(&self, id: u64) -> (JobState, Option<(Reason, u64, usize)>) {
         if self.running.contains_key(&id) {
-            return Whereabouts::Running;
+            return (JobState::Running, None);
         }
         match self.waiting(id) {
-            Some((reason, waited_s, position)) => Whereabouts::Waiting(reason, waited_s, position),
-            None => Whereabouts::NotFound,
+            Some(waiting) => (JobState::Waiting, Some(waiting)),
+            None => (JobState::NotFound, None),
         }
+    }
+
+    /// The running jobs as admission counts them.
+    fn held(&self) -> Vec<admission::Running> {
+        self.running
+            .values()
+            .map(|r| admission::Running {
+                job: r.job.id,
+                key: r.job.key.clone(),
+                estimate: reserved(&r.job.estimate),
+                observed: r.live.as_ref().and_then(|l| *lock(l)).map(observed),
+                never_seen: r.unknown,
+            })
+            .collect()
     }
 
     /// The mean unmanaged use over the newest samples; nothing before the first.
@@ -220,17 +216,11 @@ impl Scheduler {
 
     /// Takes a machine sample: the snapshot admission reads, one more unmanaged figure, and one
     /// more reading of every running job's pressure.
+    /// Unmanaged is the machine minus what admission already holds for the running jobs, so a
+    /// job is never counted twice: not an unmeasured job (counted at its estimate), and not a
+    /// measured one whose 5 s reading lags the machine's 1 s one.
     pub fn sample(&mut self, machine: &MachineSnapshot) {
-        let mut managed = Use::default();
-        for live in self
-            .running
-            .values()
-            .filter_map(|r| *lock(r.live.as_ref()?))
-        {
-            managed.cpu += live.cpu_threads;
-            managed.mem_mib += live.mem_mib as f64;
-            managed.write_mib_s += live.write_mib_s;
-        }
+        let managed = admission::committed(&self.held());
         if self.unmanaged.len() == UNMANAGED_SAMPLES {
             self.unmanaged.pop_front();
         }

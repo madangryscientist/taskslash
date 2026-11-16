@@ -6,11 +6,9 @@ use crate::Error;
 use crate::admission::Limits;
 use crate::estimate::estimate;
 use crate::launch;
-use crate::protocol::{
-    ClientMessage, DaemonMessage, JobState, Kind, Launch, Status, receive, send,
-};
+use crate::protocol::{ClientMessage, DaemonMessage, Kind, Launch, Status, receive, send};
 use crate::sampler::{FileSampler, MachineSampler, MachineSnapshot, ProcSampler};
-use crate::scheduler::{Scheduler, Whereabouts, lock};
+use crate::scheduler::{Scheduler, lock};
 use crate::store::Store;
 use std::fs::{self, DirBuilder};
 use std::io::BufReader;
@@ -185,13 +183,7 @@ impl Daemon {
 
     /// Where job `id` is and, when it waits, why.
     fn why(&self, job: u64) -> DaemonMessage {
-        let (state, waiting) = match self.scheduler().whereabouts(job) {
-            Whereabouts::Waiting(reason, waited_s, position) => {
-                (JobState::Waiting, Some((reason, waited_s, position)))
-            }
-            Whereabouts::Running => (JobState::Running, None),
-            Whereabouts::NotFound => (JobState::NotFound, None),
-        };
+        let (state, waiting) = self.scheduler().whereabouts(job);
         let (reason, waited_s, position) = match waiting {
             Some((reason, waited_s, position)) => (Some(reason), Some(waited_s), Some(position)),
             None => (None, None, None),

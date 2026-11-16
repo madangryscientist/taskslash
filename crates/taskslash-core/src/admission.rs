@@ -38,7 +38,7 @@ pub struct Running {
 
 impl Running {
     /// `max(estimate, observed)` of `resource`.
-    fn holds(&self, resource: Resource) -> f64 {
+    pub fn holds(&self, resource: Resource) -> f64 {
         let observed = self.observed.map_or(0.0, |o| o.get(resource));
         self.estimate.get(resource).max(observed)
     }
@@ -185,8 +185,7 @@ pub fn check(
         return Decision::Start;
     }
     for resource in RESOURCES {
-        let committed: f64 =
-            running.iter().map(|r| r.holds(resource)).sum::<f64>() + unmanaged.get(resource);
+        let committed = committed(running).get(resource) + unmanaged.get(resource);
         let needs = candidate.estimate.get(resource);
         if committed + needs > budget.get(resource) {
             let mut held_by: Vec<Held> = running
@@ -196,6 +195,7 @@ pub fn check(
                     key: r.key.clone(),
                     amount: r.holds(resource),
                 })
+                .filter(|h| h.amount > 0.0)
                 .collect();
             held_by.sort_by(|a, b| b.amount.total_cmp(&a.amount).then(a.job.cmp(&b.job)));
             return Decision::Wait(Reason::Resource {
@@ -250,8 +250,18 @@ fn gate(m: &MachineSnapshot) -> Option<Reason> {
         })
 }
 
-/// What the machine shows in use minus what the managed jobs show, per resource, floored at 0.
-/// `managed` is the sum of the running jobs' current use (memory as current, not peak).
+/// What the running jobs hold, per resource: the sum of `max(estimate, observed)`.
+pub fn committed(running: &[Running]) -> Use {
+    let sum = |resource| running.iter().map(|r| r.holds(resource)).sum();
+    Use {
+        cpu: sum(Resource::Cpu),
+        mem_mib: sum(Resource::Memory),
+        write_mib_s: sum(Resource::Write),
+    }
+}
+
+/// What the machine shows in use minus `managed`, what the managed jobs are counted at, per
+/// resource, floored at 0.
 pub fn unmanaged(machine: &MachineSnapshot, managed: &Use) -> Use {
     let shown = Use {
         cpu: machine.cpu.busy * machine.cpu.threads as f64,

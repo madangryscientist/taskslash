@@ -118,15 +118,7 @@ impl Drop for Daemon {
 /// Whether this machine can start a transient systemd user scope, asked the way the daemon asks.
 fn has_user_session() -> bool {
     Command::new("systemd-run")
-        .args([
-            "--user",
-            "--scope",
-            "--quiet",
-            "--collect",
-            "--expand-environment=no",
-            "--",
-            "true",
-        ])
+        .args(["--user", "--scope", "--quiet", "--", "true"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
