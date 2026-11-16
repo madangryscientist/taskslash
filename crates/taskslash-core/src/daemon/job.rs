@@ -4,7 +4,7 @@ use super::Daemon;
 use crate::admission::ordinal;
 use crate::estimate::{Source, estimate};
 use crate::measure::{self, Cost, Sampler};
-use crate::protocol::{ClientMessage, DaemonMessage, Kind, Launch, receive, send};
+use crate::protocol::{Class, ClientMessage, DaemonMessage, Kind, Launch, receive, send};
 use crate::scheduler::Job;
 use crate::store::{self, Finished};
 use std::io::BufReader;
@@ -21,7 +21,7 @@ const WAIT_POLL: Duration = Duration::from_millis(100);
 const TELL_EVERY: Duration = Duration::from_secs(15);
 
 /// A `submit`: the job's name, kind, command and directory, and what the caller said it costs
-/// (`run --cpu`, `--mem`), each of which replaces the estimate's figure.
+/// (`run --cpu`, `--mem`), each of which replaces the estimate's figure; its class and submitter.
 pub(super) struct Submitted<'a> {
     pub name: Option<&'a str>,
     pub kind: Kind,
@@ -29,6 +29,8 @@ pub(super) struct Submitted<'a> {
     pub cwd: &'a str,
     pub cpu: Option<f64>,
     pub mem_mib: Option<u64>,
+    pub class: Class,
+    pub submitter: &'a str,
 }
 
 impl Daemon {
@@ -48,6 +50,8 @@ impl Daemon {
             cwd,
             cpu,
             mem_mib,
+            class,
+            submitter,
         } = submitted;
         let id = self.next_job.fetch_add(1, Ordering::Relaxed);
         let key = store::key(name, argv);
@@ -70,6 +74,8 @@ impl Daemon {
             kind,
             estimate,
             vouched: cpu.is_some() && mem_mib.is_some(),
+            class,
+            submitter: submitter.to_owned(),
         };
         let (start, started) = mpsc::channel();
         let waiting = {
@@ -121,7 +127,7 @@ impl Daemon {
 
         // The daemon's pid keeps unit names apart across restarts and daemons on other sockets.
         let unit = format!("taskslash-{}-{id}", process::id());
-        eprintln!("job {id} started: {}", argv.join(" "));
+        eprintln!("job {id} started ({class}): {}", argv.join(" "));
         let sampler = match self.launch {
             Launch::Scope => measure::cgroup_dir(&unit).map(Sampler::start),
             Launch::Plain => None,
@@ -156,6 +162,8 @@ impl Daemon {
             kind,
             argv,
             cwd,
+            class,
+            submitter,
             launch: self.launch,
             started_at: running.started_at,
             wall_ms,

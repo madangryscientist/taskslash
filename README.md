@@ -18,6 +18,7 @@ taskslash run -- bun run test             # run a command as a job
 taskslash run --name gate -- sh -c 'exit 3'; echo $?   # 3
 taskslash run --kind browser --name visual -- bun run visual   # a cost class for its defaults
 taskslash run --cpu 4 --mem 3000 -- bun run visual             # say what it costs (threads, MiB)
+taskslash run --class urgent -- bun run test                     # first in line (default: normal)
 taskslash why 7                           # why job 7 waits (or "running")
 taskslash why 7 --json                    # the reason as an object
 taskslash history gate                    # the estimate of "gate", then what its last 20 runs cost
@@ -33,8 +34,8 @@ daemon running it does not run the command and exits 1; so do `taskslash history
 
 ### What a run records
 
-When `taskslash run` ends, the daemon writes a row: the key, the kind, the command, its directory,
-the start time, wall time, CPU seconds, the peak CPU over any 5 seconds (in threads), peak memory,
+When `taskslash run` ends, the daemon writes a row: the key, the kind, the class, the command, its
+directory, its submitter (below), the start time, wall time, CPU seconds, the peak CPU over any 5 seconds (in threads), peak memory,
 MiB written, the exit code, and the machine's pressure while it ran (`machine_cpu_some`,
 `machine_mem_some`, `machine_io_some`: the mean of the `some avg10` readings taken during the run,
 null when none was). The key is `--name` when given, else the first two words of the command
@@ -77,7 +78,7 @@ the newest run's.
 
 ### Admission
 
-The daemon decides, for each waiting job in the order they were submitted, whether it starts now.
+The daemon decides, for each waiting job in the queue's order (below), whether it starts now.
 Three resources count: CPU (threads), memory (MiB) and disk writes (MiB/s).
 
 - **Budget:** CPU is 85% of `cpu.threads` (the CPUs the daemon may use), memory 80% of
@@ -100,6 +101,39 @@ Three resources count: CPU (threads), memory (MiB) and disk writes (MiB/s).
 
 `--cpu <threads>` and `--mem <MiB>` on `run` replace the learned estimate for that run.
 
+### Order
+
+`--class` gives a job its priority class: `urgent`, `flake`, `interactive`, `normal` or
+`background`, highest first. Without it the class is `$TASKSLASH_CLASS` (so a launcher can set it
+once for everything it runs), else `normal`. An unknown class, from either, is a usage error
+(exit 2).
+
+A job's **submitter** is the nearest directory, from its working directory up, that holds a `.git`
+(a directory in a clone, a file in a worktree), else the working directory itself. Fair share is
+counted per submitter.
+
+Each pass over the queue (on every submit, end and machine sample) takes the waiting jobs in this
+order:
+
+1. **Effective class**, highest first. A job that has waited more than 15 minutes moves up one
+   class, and one more for every further 15 minutes, never past `urgent`.
+2. **Within a class**, the submitter holding the least of the machine first: for each resource, the
+   sum of `max(estimate, observed)` of its running jobs over that resource's budget, and the
+   largest of the three (Dominant Resource Fairness). A submitter with nothing running holds 0. A
+   job the pass starts counts at once, so two jobs from one idle worktree do not both go first.
+3. Then the job that has waited longest, then the lower job number.
+
+A job that fits starts. A job that does not is passed over and the pass goes on, so a later,
+smaller job may start (**backfill**), unless the one passed over waits for room and has waited more
+than 5 minutes:
+then nothing behind it starts until it has (**the starvation guard**), and those behind it wait
+with `behind <key> (job <n>), which has waited over 5 minutes and is not passed`. A gate holds every
+job. A higher class never stops, kills or freezes a running job; it is only first in line.
+
+**Weights.** On the scope path a job runs with `-p CPUWeight=<w>` from its class: `urgent` 400,
+`flake` 300, `interactive` 200, `normal` 100, `background` 20. Weights share out a busy CPU between
+running jobs; they do not admit. The plain path has no weight.
+
 A job that waits is told why on stderr when it is queued and every 15 seconds after. The line names
 the first thing that holds it, checked in this order: a gate, the never-seen rule, a resource. A
 resource line lists the running jobs that hold the most of it first:
@@ -113,7 +147,8 @@ taskslash: waiting 30s (1st in line): cpu pressure 52% over the 40% gate
 the daemon does not hold (an ended job's record is in `history`). With `--json` it prints the
 reason: `{"kind":"resource","resource":"cpu","needs":4.8,"free":1.8,"held_by":[{"job":3,"key":
 "cli-db:test","amount":3.0}]}`, `{"kind":"gate","gate":"cpu_pressure","value":52.0,"limit":40.0}`,
-`{"kind":"never_seen","job":3,"key":"..."}`, or `{"kind":"running"}`. A `taskslash run` stopped
+`{"kind":"never_seen","job":3,"key":"..."}`, `{"kind":"behind","job":3,"key":"..."}`, or
+`{"kind":"running"}`. A `taskslash run` stopped
 while it waits leaves the queue and its command never runs.
 
 **A fake machine, for tests.** With `TASKSLASH_FAKE_MACHINE=<file>` in its environment the daemon
@@ -126,7 +161,8 @@ tests can set the machine's load and pressure; do not use it otherwise.
 `taskslash status` answers from the daemon's latest machine reading, taken once a second (free
 space every 30 seconds), and lists the running jobs with their last live reading. The plain form is
 a few lines: CPU, the `some avg10` pressures, memory, each disk, each mount, then one line per
-running job and one per waiting job.
+running job and one per waiting job (`waiting 9 visual (browser, background, as normal) 960s (2nd in
+line): ...` for a job whose class waiting has raised).
 
 | Field (`--json`) | What it is |
 | --- | --- |
@@ -139,8 +175,8 @@ running job and one per waiting job.
 | `io.disks[]` | each physical disk in `/sys/block` (not `loop`, `ram`, `zram` or `dm-` devices): `busy` is the share of time it had I/O in flight, `write_mib_s` its write rate |
 | `mounts[]` | `$HOME`, `$TMPDIR` and `/tmp`, one per file system: size, space free to you, and the share used |
 | `load` | `/proc/loadavg`, for people only |
-| `jobs[]` | each running job: `job`, `key`, `kind`, `started_at`, its `cpu_threads` and `mem_mib` now (null until the first reading and always on an unmeasured run), and its `estimate` |
-| `waiting[]` | each waiting job, in queue order: `job`, `key`, `kind`, `waited_s`, `position` (1-based), `reason` (the sentence), `why` (the reason object) and its `estimate` |
+| `jobs[]` | each running job: `job`, `key`, `kind`, `class`, `submitter`, `started_at`, its `cpu_threads` and `mem_mib` now (null until the first reading and always on an unmeasured run), and its `estimate` |
+| `waiting[]` | each waiting job, in the order of the last pass: `job`, `key`, `kind`, `class`, `effective_class` (only when waiting has raised it), `submitter`, `waited_s`, `position` (1-based), `reason` (the sentence), `why` (the reason object) and its `estimate` |
 
 Shares and rates are 0 in the first second after the daemon starts, before there are two readings.
 

@@ -11,6 +11,8 @@ fn messages_round_trip_as_tagged_json_lines() {
         cwd: "/work".into(),
         cpu: None,
         mem_mib: None,
+        class: Class::Flake,
+        submitter: "/work".into(),
     };
     let start = DaemonMessage::Start {
         job: 3,
@@ -26,7 +28,7 @@ fn messages_round_trip_as_tagged_json_lines() {
     send(&mut wire, &history).unwrap();
     assert_eq!(
         String::from_utf8_lossy(&wire),
-        "{\"type\":\"submit\",\"name\":\"probe\",\"kind\":\"browser\",\"argv\":[\"sh\",\"-c\",\"exit 3\"],\"cwd\":\"/work\"}\n\
+        "{\"type\":\"submit\",\"name\":\"probe\",\"kind\":\"browser\",\"argv\":[\"sh\",\"-c\",\"exit 3\"],\"cwd\":\"/work\",\"class\":\"flake\",\"submitter\":\"/work\"}\n\
          {\"type\":\"start\",\"job\":3,\"unit\":\"taskslash-1-3\",\"launch\":\"scope\"}\n\
          {\"type\":\"history\",\"key\":\"probe\"}\n"
     );

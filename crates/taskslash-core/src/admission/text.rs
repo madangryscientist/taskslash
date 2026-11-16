@@ -1,6 +1,7 @@
 //! The words: the sentence a `Reason` reads as, and the waiting line.
 
 use super::{Gate, Reason, Resource};
+use crate::order::GUARD_AFTER;
 use std::fmt;
 
 /// The plain sentence `taskslash why`, the waiting line and `status` print.
@@ -34,6 +35,11 @@ impl fmt::Display for Reason {
             Self::NeverSeen { job, key } => {
                 write!(f, "another never-seen job is running: {key} (job {job})")
             }
+            Self::Behind { job, key } => write!(
+                f,
+                "behind {key} (job {job}), which has waited over {} minutes and is not passed",
+                GUARD_AFTER.as_secs() / 60
+            ),
             Self::Resource {
                 resource,
                 needs,

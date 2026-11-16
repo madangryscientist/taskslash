@@ -48,13 +48,17 @@ pub fn status_text(status: &Status) -> String {
             .map_or("-".to_owned(), |t| format!("{t:.2}"));
         let mem = job.mem_mib.map_or("-".to_owned(), |m| m.to_string());
         out.push_str(&format!(
-            "job {}     {} since {}, {cpu} threads, {mem} MiB\n",
-            job.job, job.key, job.started_at
+            "job {}     {} ({}) since {}, {cpu} threads, {mem} MiB\n",
+            job.job, job.key, job.class, job.started_at
         ));
     }
     for w in &status.waiting {
+        let class = match w.effective_class {
+            Some(raised) => format!("{}, as {raised}", w.class),
+            None => w.class.to_string(),
+        };
         out.push_str(&format!(
-            "waiting {} {} ({}) {:.0}s ({} in line): {}\n",
+            "waiting {} {} ({}, {class}) {:.0}s ({} in line): {}\n",
             w.job,
             w.key,
             w.kind,
@@ -120,7 +124,7 @@ pub fn table(runs: &[Run]) -> String {
 mod tests {
     use super::*;
     use taskslash_core::estimate::estimate;
-    use taskslash_core::protocol::{Kind, Launch};
+    use taskslash_core::protocol::{Class, Kind, Launch};
 
     #[test]
     fn a_plain_run_shows_a_dash_for_each_cost() {
@@ -130,6 +134,8 @@ mod tests {
             kind: Kind::Command,
             argv: vec!["sh".into(), "-c".into(), "exit 4".into()],
             cwd: "/work".into(),
+            class: Class::Normal,
+            submitter: "/work".into(),
             launch: Launch::Plain,
             started_at: "2026-11-16T02:17:44.464Z".into(),
             wall_ms: 1234,

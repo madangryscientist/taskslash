@@ -1,11 +1,12 @@
 //! What `taskslash status` shows of the scheduler.
 
 use super::{Scheduler, lock, round};
+use crate::order;
 use crate::procfs;
 use crate::protocol::{JobStatus, WaitingStatus};
 
 impl Scheduler {
-    /// The running jobs, oldest first, and the waiting ones in queue order.
+    /// The running jobs, oldest first, and the waiting ones in the last pass's order.
     pub fn status(&self) -> (Vec<JobStatus>, Vec<WaitingStatus>) {
         let jobs = self
             .running
@@ -16,6 +17,8 @@ impl Scheduler {
                     job: r.job.id,
                     key: r.job.key.clone(),
                     kind: r.job.kind,
+                    class: r.job.class,
+                    submitter: r.job.submitter.clone(),
                     started_at: procfs::rfc3339(r.started_at),
                     cpu_threads: live.map(|l| round(l.cpu_threads, 2)),
                     mem_mib: live.map(|l| l.mem_mib),
@@ -31,7 +34,11 @@ impl Scheduler {
                 job: w.job.id,
                 key: w.job.key.clone(),
                 kind: w.job.kind,
-                waited_s: round(w.queued_at.elapsed().as_secs_f64(), 1),
+                class: w.job.class,
+                effective_class: Some(order::effective(w.job.class, w.submitted_at.elapsed()))
+                    .filter(|&c| c != w.job.class),
+                submitter: w.job.submitter.clone(),
+                waited_s: round(w.submitted_at.elapsed().as_secs_f64(), 1),
                 position: at + 1,
                 reason: w
                     .reason

@@ -13,7 +13,7 @@
 
 use crate::admission::Reason;
 use crate::estimate::Estimate;
-use crate::sampler::MachineSnapshot;
+pub use crate::order::Class;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -103,6 +103,9 @@ pub enum ClientMessage {
         cpu: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mem_mib: Option<u64>,
+        class: Class,
+        /// The nearest ancestor of `cwd` (or `cwd`) holding a `.git`, else `cwd`.
+        submitter: String,
     },
     /// The job's command has exited with `code`.
     Exited { job: u64, code: i32 },
@@ -189,6 +192,8 @@ pub struct Run {
     pub kind: Kind,
     pub argv: Vec<String>,
     pub cwd: String,
+    pub class: Class,
+    pub submitter: String,
     pub launch: Launch,
     /// RFC 3339, UTC.
     pub started_at: String,
@@ -205,52 +210,6 @@ pub struct Run {
     pub machine_cpu_some: Option<f64>,
     pub machine_mem_some: Option<f64>,
     pub machine_io_some: Option<f64>,
-}
-
-/// What the machine and the running jobs are doing, as `taskslash status --json` prints it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Status {
-    pub machine: MachineSnapshot,
-    /// The running jobs, oldest first.
-    pub jobs: Vec<JobStatus>,
-    /// The waiting jobs, in the order they will be considered.
-    pub waiting: Vec<WaitingStatus>,
-}
-
-/// A running job and the last live reading of it. The reading is `None` before its first one, and
-/// always on the plain launch path (nothing measures it).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct JobStatus {
-    pub job: u64,
-    pub key: String,
-    pub kind: Kind,
-    /// RFC 3339, UTC.
-    pub started_at: String,
-    pub cpu_threads: Option<f64>,
-    pub mem_mib: Option<u64>,
-    pub estimate: Estimate,
-}
-
-/// A queued job: how long it has waited, its 1-based place in the queue, and why: `reason` as the
-/// sentence `why` prints, `why` as the object `why --json` prints (`None` before its first pass).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WaitingStatus {
-    pub job: u64,
-    pub key: String,
-    pub kind: Kind,
-    pub waited_s: f64,
-    pub position: usize,
-    pub reason: String,
-    pub why: Option<Reason>,
-    pub estimate: Estimate,
-}
-
-/// `status` as the one line of JSON `taskslash status --json` prints, with its newline.
-pub fn status_json(status: Status) -> String {
-    let mut text =
-        serde_json::to_string(&DaemonMessage::Status(Box::new(status))).unwrap_or_default();
-    text.push('\n');
-    text
 }
 
 /// `{"estimate":...,"runs":[...]}`, pretty, and a newline, as `taskslash history --json` prints it.
@@ -288,6 +247,9 @@ pub fn receive<T: DeserializeOwned>(reader: &mut impl BufRead) -> io::Result<Opt
     }
     Ok(Some(serde_json::from_str(&line)?))
 }
+
+mod status;
+pub use status::{JobStatus, Status, WaitingStatus, status_json};
 
 #[cfg(test)]
 mod tests;

@@ -1,10 +1,12 @@
 //! The queue of waiting jobs and the set of running ones. `admit` is the one place a waiting job
-//! starts: it walks the queue in `order` and starts every job `admission::check` lets start,
-//! counting each one it starts against the jobs after it.
+//! starts: it runs `order::pass` over them and starts the jobs it picks. Between passes the queue
+//! is kept in the pass's order, so a job's index is its place in line.
 
-use crate::admission::{self, Decision, Demand, Limits, Reason, Use};
+use crate::admission::{self, Demand, Limits, Reason, Use};
 use crate::estimate::Estimate;
 use crate::measure::{Live, LiveReading};
+use crate::order;
+use crate::order::{Active, Class, Queued};
 use crate::protocol::{JobState, Kind};
 use crate::sampler::MachineSnapshot;
 use crate::store::RunPressure;
@@ -21,6 +23,9 @@ pub struct Job {
     pub estimate: Estimate,
     /// The caller gave both `--cpu` and `--mem`: never treated as never seen.
     pub vouched: bool,
+    pub class: Class,
+    /// The worktree (or directory) it was submitted from, which fair share is counted by.
+    pub submitter: String,
 }
 
 /// How many machine samples the unmanaged figure is the mean of.
@@ -28,7 +33,7 @@ const UNMANAGED_SAMPLES: usize = 30;
 
 struct Waiting {
     job: Job,
-    queued_at: Instant,
+    submitted_at: Instant,
     /// Why it is still waiting, from the last `admit`.
     reason: Option<Reason>,
     /// The connection thread waits on the other end for its start.
@@ -94,41 +99,54 @@ impl Scheduler {
     pub fn submit(&mut self, job: Job, start: Sender<()>) {
         self.queue.push(Waiting {
             job,
-            queued_at: Instant::now(),
+            submitted_at: Instant::now(),
             reason: None,
             start,
         });
     }
 
-    /// Starts every waiting job, in `order`, that `admission::check` allows, each against the
-    /// running set as it grows. `seen` says whether a key has a finished run.
+    /// Starts every waiting job `order::pass` lets start, as of now, and puts the rest in its
+    /// order with their reasons. `seen` says whether a key has a finished run.
     pub fn admit(&mut self, seen: impl Fn(&str) -> bool) {
-        let mut held = self.held();
-        let unmanaged = self.unmanaged();
-        for id in self.order() {
-            let Some(at) = self.queue.iter().position(|w| w.job.id == id) else {
+        let now = Instant::now();
+        let running: Vec<Active> = self
+            .running
+            .values()
+            .map(|r| Active {
+                held: self.held_by(r),
+                submitter: r.job.submitter.clone(),
+            })
+            .collect();
+        let queued: Vec<Queued> = self
+            .queue
+            .iter()
+            .map(|w| Queued {
+                id: w.job.id,
+                key: w.job.key.clone(),
+                class: w.job.class,
+                submitter: w.job.submitter.clone(),
+                submitted_at: w.submitted_at,
+                demand: Demand {
+                    estimate: reserved(&w.job.estimate),
+                    never_seen: !w.job.vouched && !seen(&w.job.key),
+                },
+            })
+            .collect();
+        let pass = order::pass(
+            &queued,
+            &running,
+            &self.machine,
+            &self.unmanaged(),
+            &self.limits,
+            now,
+        );
+        let mut queue: BTreeMap<u64, Waiting> =
+            self.queue.drain(..).map(|w| (w.job.id, w)).collect();
+        for id in pass.start {
+            let Some(waiting) = queue.remove(&id) else {
                 continue;
             };
-            let job = &self.queue[at].job;
-            let unknown = !job.vouched && !seen(&job.key);
-            let demand = Demand {
-                estimate: reserved(&job.estimate),
-                never_seen: unknown,
-            };
-            let decision =
-                admission::check(&self.machine, &unmanaged, &held, &demand, &self.limits);
-            if let Decision::Wait(reason) = decision {
-                self.queue[at].reason = Some(reason);
-                continue;
-            }
-            held.push(admission::Running {
-                job: id,
-                key: job.key.clone(),
-                estimate: demand.estimate,
-                observed: None,
-                never_seen: unknown,
-            });
-            let waiting = self.queue.remove(at);
+            let unknown = queued.iter().any(|q| q.id == id && q.demand.never_seen);
             // The connection thread is gone only if it panicked; nothing then runs the job.
             if waiting.start.send(()).is_ok() {
                 self.running.insert(
@@ -144,11 +162,12 @@ impl Scheduler {
                 );
             }
         }
-    }
-
-    /// The order the queue is considered in: submit order.
-    fn order(&self) -> Vec<u64> {
-        self.queue.iter().map(|w| w.job.id).collect()
+        for (id, _, reason) in pass.waiting {
+            if let Some(mut waiting) = queue.remove(&id) {
+                waiting.reason = Some(reason);
+                self.queue.push(waiting);
+            }
+        }
     }
 
     /// Why job `id` waits, how long it has, and its 1-based place in the queue; `None` when it
@@ -157,7 +176,7 @@ impl Scheduler {
         let at = self.queue.iter().position(|w| w.job.id == id)?;
         let w = &self.queue[at];
         let reason = w.reason.clone()?;
-        Some((reason, w.queued_at.elapsed().as_secs(), at + 1))
+        Some((reason, w.submitted_at.elapsed().as_secs(), at + 1))
     }
 
     /// Where job `id` is and, when it waits, why, how long and its place in line.
@@ -171,18 +190,15 @@ impl Scheduler {
         }
     }
 
-    /// The running jobs as admission counts them.
-    fn held(&self) -> Vec<admission::Running> {
-        self.running
-            .values()
-            .map(|r| admission::Running {
-                job: r.job.id,
-                key: r.job.key.clone(),
-                estimate: reserved(&r.job.estimate),
-                observed: r.live.as_ref().and_then(|l| *lock(l)).map(observed),
-                never_seen: r.unknown,
-            })
-            .collect()
+    /// A running job as admission counts it.
+    fn held_by(&self, r: &Running) -> admission::Running {
+        admission::Running {
+            job: r.job.id,
+            key: r.job.key.clone(),
+            estimate: reserved(&r.job.estimate),
+            observed: r.live.as_ref().and_then(|l| *lock(l)).map(observed),
+            never_seen: r.unknown,
+        }
     }
 
     /// The mean unmanaged use over the newest samples; nothing before the first.

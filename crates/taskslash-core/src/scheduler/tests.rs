@@ -13,6 +13,8 @@ fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<()> {
         kind: Kind::Command,
         estimate: estimate(&[], Kind::Command),
         vouched: false,
+        class: Class::Normal,
+        submitter: "/work".into(),
     };
     s.submit(job, start);
     started
@@ -106,6 +108,8 @@ fn an_unmeasured_job_is_not_counted_again_as_unmanaged() {
             kind: Kind::Command,
             estimate,
             vouched: true,
+            class: Class::Normal,
+            submitter: "/work".into(),
         };
         s.submit(job, start);
         started
@@ -140,6 +144,8 @@ fn a_measured_job_below_its_estimate_does_not_hide_outside_load() {
         kind: Kind::Command,
         estimate: estimate.clone(),
         vouched: true,
+        class: Class::Normal,
+        submitter: "/work".into(),
     };
     let (start, _first) = mpsc::channel();
     s.submit(job(1), start);

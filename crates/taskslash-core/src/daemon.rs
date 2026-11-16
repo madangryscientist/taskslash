@@ -133,6 +133,8 @@ impl Daemon {
                 cwd,
                 cpu,
                 mem_mib,
+                class,
+                submitter,
             })) if !argv.is_empty() => {
                 let submitted = job::Submitted {
                     name: name.as_deref(),
@@ -141,6 +143,8 @@ impl Daemon {
                     cwd: &cwd,
                     cpu,
                     mem_mib,
+                    class,
+                    submitter: &submitter,
                 };
                 self.serve_job(&mut reader, &mut writer, submitted);
             }
