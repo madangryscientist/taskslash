@@ -8,19 +8,9 @@
 $schema: "./cache/schemas/workspace.json"
 
 projects:
-  # template:begin web
-  web: "apps/web"
-  # template:end web
-  # template:begin cli
-  cli: "packages/cli"
-  # template:end cli
-  # template:begin engine
   engine: "packages/engine"
-  # template:end engine
-  # template:begin rust
-  core: "crates/slashproduct-core"
-  bin: "crates/slashproduct"
-  # template:end rust
+  core: "crates/taskslash-core"
+  bin: "crates/taskslash"
   scripts: "scripts"
 
 vcs:

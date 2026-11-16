@@ -1,6 +1,0 @@
-dist/
-.wrangler/
-.tanstack/
-test-results/
-playwright-report/
-.dev.vars

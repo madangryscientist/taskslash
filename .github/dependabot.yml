@@ -15,7 +15,6 @@ updates:
     groups:
       actions:
         patterns: ["*"]
-  # template:begin rust
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -23,4 +22,3 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
-  # template:end rust
