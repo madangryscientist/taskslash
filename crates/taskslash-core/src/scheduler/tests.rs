@@ -126,3 +126,44 @@ fn an_unmeasured_job_is_not_counted_again_as_unmanaged() {
         s.waiting(2).map(|w| w.0.to_string())
     );
 }
+
+#[test]
+fn a_measured_job_below_its_estimate_does_not_hide_outside_load() {
+    // A measured job estimated at 4 uses 0.5 now; outside work uses 3.5, so the machine shows 4.
+    // Unmanaged is 3.5, committed 4 + 3.5 = 7.5, and a 4 thread job must wait (11.5 > 8.5).
+    let mut s = Scheduler::new(Limits::default(), machine());
+    let mut estimate = estimate(&[], Kind::Command);
+    estimate.cpu_threads = 4.0;
+    let job = |id: u64| Job {
+        id,
+        key: format!("k{id}"),
+        kind: Kind::Command,
+        estimate: estimate.clone(),
+        vouched: true,
+    };
+    let (start, _first) = mpsc::channel();
+    s.submit(job(1), start);
+    s.admit(|_| true);
+    let live = LiveReading::default();
+    *lock(&live) = Some(Live {
+        cpu_threads: 0.5,
+        mem_mib: 10,
+        peak_mem_mib: 10,
+        write_mib_s: 0.0,
+    });
+    s.set_live(1, live);
+    let mut busy = machine();
+    busy.cpu.busy = 0.4;
+    for _ in 0..30 {
+        s.sample(&busy);
+    }
+    let (start, second) = mpsc::channel();
+    s.submit(job(2), start);
+    s.admit(|_| true);
+    assert!(second.try_recv().is_err());
+    let (reason, ..) = s.waiting(2).unwrap();
+    assert!(
+        reason.to_string().starts_with("cpu needs 4.0, free 1.0"),
+        "{reason}"
+    );
+}

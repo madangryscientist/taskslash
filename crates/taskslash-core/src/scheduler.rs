@@ -216,11 +216,24 @@ impl Scheduler {
 
     /// Takes a machine sample: the snapshot admission reads, one more unmanaged figure, and one
     /// more reading of every running job's pressure.
-    /// Unmanaged is the machine minus what admission already holds for the running jobs, so a
-    /// job is never counted twice: not an unmeasured job (counted at its estimate), and not a
-    /// measured one whose 5 s reading lags the machine's 1 s one.
+    /// Unmanaged is the machine minus what the running jobs use now: a measured job's live
+    /// reading (memory as current, not peak), and an unmeasured job's estimate, since its real use
+    /// is in the machine's figure and admission already counts it at its estimate.
     pub fn sample(&mut self, machine: &MachineSnapshot) {
-        let managed = admission::committed(&self.held());
+        let mut managed = Use::default();
+        for r in self.running.values() {
+            let now = match r.live.as_ref().and_then(|l| *lock(l)) {
+                Some(live) => Use {
+                    cpu: live.cpu_threads,
+                    mem_mib: live.mem_mib as f64,
+                    write_mib_s: live.write_mib_s,
+                },
+                None => reserved(&r.job.estimate),
+            };
+            managed.cpu += now.cpu;
+            managed.mem_mib += now.mem_mib;
+            managed.write_mib_s += now.write_mib_s;
+        }
         if self.unmanaged.len() == UNMANAGED_SAMPLES {
             self.unmanaged.pop_front();
         }

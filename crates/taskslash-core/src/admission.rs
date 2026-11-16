@@ -38,7 +38,7 @@ pub struct Running {
 
 impl Running {
     /// `max(estimate, observed)` of `resource`.
-    pub fn holds(&self, resource: Resource) -> f64 {
+    fn holds(&self, resource: Resource) -> f64 {
         let observed = self.observed.map_or(0.0, |o| o.get(resource));
         self.estimate.get(resource).max(observed)
     }
@@ -251,7 +251,7 @@ fn gate(m: &MachineSnapshot) -> Option<Reason> {
 }
 
 /// What the running jobs hold, per resource: the sum of `max(estimate, observed)`.
-pub fn committed(running: &[Running]) -> Use {
+fn committed(running: &[Running]) -> Use {
     let sum = |resource| running.iter().map(|r| r.holds(resource)).sum();
     Use {
         cpu: sum(Resource::Cpu),
@@ -260,8 +260,8 @@ pub fn committed(running: &[Running]) -> Use {
     }
 }
 
-/// What the machine shows in use minus `managed`, what the managed jobs are counted at, per
-/// resource, floored at 0.
+/// What the machine shows in use minus `managed`, what the managed jobs use now, per resource,
+/// floored at 0.
 pub fn unmanaged(machine: &MachineSnapshot, managed: &Use) -> Use {
     let shown = Use {
         cpu: machine.cpu.busy * machine.cpu.threads as f64,

@@ -85,9 +85,9 @@ Three resources count: CPU (threads), memory (MiB) and disk writes (MiB/s).
   `TASKSLASH_CPU_SHARE`, `TASKSLASH_MEM_SHARE` and `TASKSLASH_WRITE_MIB_S`.
 - **Committed:** each running job counts at the larger of its estimate and what it uses now (CPU
   and writes over the last 5 seconds, memory at its peak so far; an unmeasured job counts at its
-  estimate), plus **unmanaged** use: what the machine shows minus what the jobs are counted at,
-  floored at 0, the mean of the last 30 one second samples. So the total is never less than the
-  machine shows, and no job is counted twice. Machine CPU is `cpu.busy` times `cpu.threads`,
+  estimate), plus **unmanaged** use: what the machine shows minus what the jobs use now (an
+  unmeasured job at its estimate, so it is not counted twice), floored at 0, the mean of the last
+  30 one second samples. Machine CPU is `cpu.busy` times `cpu.threads`,
   memory `total_mib - available_mib`, writes the sum over the disks.
 - **A job fits** when, for every resource, committed plus its estimate is within the budget.
 - **Gates:** while any holds nothing starts: CPU `some avg10` over 40, memory `some avg10` over 5,
