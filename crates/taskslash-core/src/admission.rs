@@ -1,5 +1,6 @@
 //! The admission rule (spike 5.1), a pure function: may a waiting job start now, and if not, the
 //! first thing that holds it. Gates first, then the never-seen rule, then the three resources.
+//! The order jobs are asked in, and the starvation guard, are `order`'s.
 
 use crate::Error;
 use crate::sampler::MachineSnapshot;
@@ -38,7 +39,7 @@ pub struct Running {
 
 impl Running {
     /// `max(estimate, observed)` of `resource`.
-    fn holds(&self, resource: Resource) -> f64 {
+    pub fn holds(&self, resource: Resource) -> f64 {
         let observed = self.observed.map_or(0.0, |o| o.get(resource));
         self.estimate.get(resource).max(observed)
     }
@@ -84,6 +85,17 @@ impl Limits {
     }
 }
 
+impl Limits {
+    /// What jobs may commit on `machine`: the CPU and memory shares of it, and the write budget.
+    pub fn budget(&self, machine: &MachineSnapshot) -> Use {
+        Use {
+            cpu: self.cpu_share * machine.cpu.threads as f64,
+            mem_mib: self.mem_share * machine.memory.total_mib as f64,
+            write_mib_s: self.write_mib_s,
+        }
+    }
+}
+
 impl Default for Limits {
     /// The spike's starting values, tuned in the proof run.
     fn default() -> Self {
@@ -123,6 +135,8 @@ pub enum Reason {
         free: f64,
         held_by: Vec<Held>,
     },
+    /// Job `job` is ahead in line, does not fit, and has waited too long to be passed.
+    Behind { job: u64, key: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,11 +187,7 @@ pub fn check(
             key: other.key.clone(),
         });
     }
-    let budget = Use {
-        cpu: limits.cpu_share * machine.cpu.threads as f64,
-        mem_mib: limits.mem_share * machine.memory.total_mib as f64,
-        write_mib_s: limits.write_mib_s,
-    };
+    let budget = limits.budget(machine);
     let too_big = RESOURCES
         .iter()
         .any(|&r| candidate.estimate.get(r) > budget.get(r));

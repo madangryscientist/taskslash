@@ -1,7 +1,7 @@
 //! How a job's command is started: in a transient systemd user scope when this machine has a user
 //! session, else as a plain child.
 
-use crate::protocol::Launch;
+use crate::protocol::{Class, Launch};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -63,7 +63,8 @@ pub fn probe() -> Launch {
 
 /// The command that runs `argv` the way `launch` says. stdio, cwd and env are inherited either way;
 /// `systemd-run --scope` runs the command in this process's foreground and passes its exit through.
-pub fn command(launch: Launch, unit: &str, argv: &[OsString]) -> Command {
+/// A scope gets its class's `CPUWeight`, which shares out a busy CPU; the plain path has none.
+pub fn command(launch: Launch, unit: &str, class: Class, argv: &[OsString]) -> Command {
     match launch {
         Launch::Plain => {
             let mut command = Command::new(&argv[0]);
@@ -76,6 +77,7 @@ pub fn command(launch: Launch, unit: &str, argv: &[OsString]) -> Command {
                 .args(scope_args())
                 .arg(format!("--slice={SLICE}"))
                 .arg(format!("--unit={unit}"))
+                .args(["-p".to_owned(), format!("CPUWeight={}", class.cpu_weight())])
                 .arg("--")
                 .args(argv);
             command
@@ -109,7 +111,7 @@ mod tests {
     #[test]
     fn a_scope_wraps_the_command_in_systemd_run() {
         let argv: Vec<OsString> = vec!["sh".into(), "-c".into(), "exit 4".into()];
-        let command = command(Launch::Scope, "taskslash-9-1", &argv);
+        let command = command(Launch::Scope, "taskslash-9-1", Class::Flake, &argv);
         assert_eq!(command.get_program(), "systemd-run");
         let mut args: Vec<_> = command.get_args().collect();
         // Only where this machine's systemd-run takes it.
@@ -127,6 +129,8 @@ mod tests {
                 "--collect",
                 "--slice=taskslash.slice",
                 "--unit=taskslash-9-1",
+                "-p",
+                "CPUWeight=300",
                 "--",
                 "sh",
                 "-c",

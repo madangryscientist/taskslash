@@ -21,6 +21,8 @@ fn finished<'a>(argv: &'a [String], launch: Launch, at: u64, cost: Cost) -> Fini
         kind: Kind::Test,
         argv,
         cwd: "/work",
+        class: Class::Flake,
+        submitter: "/work",
         launch,
         started_at: UNIX_EPOCH + Duration::from_millis(at),
         wall_ms: 12,
@@ -47,6 +49,7 @@ fn a_plain_run_is_recorded_with_null_costs() {
     let run = &runs[0];
     assert_eq!(run.argv, argv);
     assert_eq!(run.launch, Launch::Plain);
+    assert_eq!((run.class, run.submitter.as_str()), (Class::Flake, "/work"));
     assert_eq!(run.started_at, "2025-11-16T10:46:40.123Z");
     assert_eq!((run.wall_ms, run.exit_code), (12, Some(4)));
     assert_eq!(run.cpu_usec, None);

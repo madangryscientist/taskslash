@@ -4,13 +4,14 @@
 //! its command's code instead. `taskslash history` and `taskslash status` exit 1 when no daemon is
 //! running, as `run` does.
 
-use clap::{Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 use taskslash_core::Error;
 use taskslash_core::admission::waiting_line;
-use taskslash_core::protocol::Kind;
+use taskslash_core::protocol::{Class, Kind};
 use text::{estimate_text, status_text, table};
 
 mod text;
@@ -30,7 +31,10 @@ enum Commands {
     /// Run a command as a job of the daemon.
     ///
     /// Waits while the daemon will not start it yet: until no pressure gate holds, no other
-    /// never-seen job runs, and its estimate fits beside what is committed. A waiting run prints
+    /// never-seen job runs, and its estimate fits beside what is committed. Waiting jobs are
+    /// considered by class (raised one class per 15 minutes waited), then the submitting
+    /// worktree's share of the machine, then time waited. A later job that fits may start
+    /// before an earlier one, unless the earlier one has waited over 5 minutes. A waiting run prints
     /// `taskslash: waiting <n>s (<place> in line): <reason>` on stderr when queued and every 15 s.
     ///
     /// Exits with the command's exit code (128+N when signal N killed it, 127 when it cannot be
@@ -43,6 +47,10 @@ enum Commands {
         /// build, browser or command.
         #[arg(long, default_value_t = Kind::Command)]
         kind: Kind,
+        /// The job's priority class, which orders the queue and sets its CPU weight: urgent,
+        /// flake, interactive, normal or background. Default: `TASKSLASH_CLASS`, else normal.
+        #[arg(long)]
+        class: Option<Class>,
         /// The CPU it takes, in threads, in place of the learned estimate.
         #[arg(long, value_parser = positive)]
         cpu: Option<f64>,
@@ -94,6 +102,22 @@ fn positive(text: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("{text} is not a number above 0"))
 }
 
+/// `--class`, else `TASKSLASH_CLASS` when set and not empty, else normal. A `TASKSLASH_CLASS` that
+/// is not a class is a usage error, as a bad `--class` is.
+fn class(flag: Option<Class>) -> Class {
+    if let Some(class) = flag {
+        return class;
+    }
+    let Some(text) = std::env::var_os("TASKSLASH_CLASS").filter(|v| !v.is_empty()) else {
+        return Class::Normal;
+    };
+    text.to_string_lossy().parse().unwrap_or_else(|e: String| {
+        Cli::command()
+            .error(ErrorKind::InvalidValue, format!("TASKSLASH_CLASS: {e}"))
+            .exit()
+    })
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match dispatch(cli.command) {
@@ -112,12 +136,13 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
         Commands::Run {
             name,
             kind,
+            class: flag,
             cpu,
             mem,
             command,
         } => {
             let demand = taskslash_core::Demand { cpu, mem_mib: mem };
-            taskslash_core::run(&socket, name, kind, demand, &command)
+            taskslash_core::run(&socket, name, kind, class(flag), demand, &command)
         }
         Commands::Why { job, json } => {
             let text = match (taskslash_core::why(&socket, job)?, json) {

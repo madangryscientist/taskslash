@@ -3,7 +3,7 @@
 use crate::Error;
 use crate::estimate::RunCost;
 use crate::measure::Cost;
-use crate::protocol::{Kind, Launch, Run};
+use crate::protocol::{Class, Kind, Launch, Run};
 use rusqlite::types::Type;
 use rusqlite::{Connection, Row, params};
 use std::env;
@@ -59,6 +59,8 @@ pub struct Finished<'a> {
     pub kind: Kind,
     pub argv: &'a [String],
     pub cwd: &'a str,
+    pub class: Class,
+    pub submitter: &'a str,
     pub launch: Launch,
     pub started_at: SystemTime,
     pub wall_ms: u64,
@@ -99,6 +101,8 @@ impl Store {
                 kind TEXT NOT NULL,
                 argv TEXT NOT NULL,
                 cwd TEXT NOT NULL,
+                class TEXT NOT NULL,
+                submitter TEXT NOT NULL,
                 launch TEXT NOT NULL,
                 started_at TEXT NOT NULL,
                 wall_ms INTEGER NOT NULL,
@@ -129,10 +133,10 @@ impl Store {
             .execute(
                 "INSERT INTO runs (key, kind, argv, cwd, launch, started_at, wall_ms, cpu_usec,
                     peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code, machine_cpu_some,
-                    machine_mem_some, machine_io_some)
+                    machine_mem_some, machine_io_some, class, submitter)
                  VALUES (?1, ?2, ?3, ?4, ?5,
                     strftime('%Y-%m-%dT%H:%M:%fZ', ?6 / 1000.0, 'unixepoch'),
-                    ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     run.key,
                     run.kind.as_str(),
@@ -149,6 +153,8 @@ impl Store {
                     run.pressure.cpu,
                     run.pressure.mem,
                     run.pressure.io,
+                    run.class.as_str(),
+                    run.submitter,
                 ],
             )
             .map_err(sql)?;
@@ -162,7 +168,7 @@ impl Store {
             .prepare(
                 "SELECT id, key, kind, argv, cwd, launch, started_at, wall_ms, cpu_usec,
                     peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code, machine_cpu_some,
-                    machine_mem_some, machine_io_some
+                    machine_mem_some, machine_io_some, class, submitter
                  FROM runs WHERE key = ?1 ORDER BY started_at DESC, id DESC LIMIT ?2",
             )
             .map_err(sql)?;
@@ -224,12 +230,15 @@ fn from_row(row: &Row) -> rusqlite::Result<Run> {
     let kind: String = row.get(2)?;
     let argv: String = row.get(3)?;
     let launch: String = row.get(5)?;
+    let class: String = row.get(16)?;
     Ok(Run {
         id: row.get(0)?,
         key: row.get(1)?,
         kind: serde_json::from_value(kind.into()).map_err(|e| bad(2, e))?,
         argv: serde_json::from_str(&argv).map_err(|e| bad(3, e))?,
         cwd: row.get(4)?,
+        class: serde_json::from_value(class.into()).map_err(|e| bad(16, e))?,
+        submitter: row.get(17)?,
         launch: serde_json::from_value(launch.into()).map_err(|e| bad(5, e))?,
         started_at: row.get(6)?,
         wall_ms: row.get(7)?,

@@ -8,7 +8,7 @@ use crate::admission::{Reason, waiting_line};
 use crate::estimate::Estimate;
 use crate::launch;
 use crate::protocol::{
-    ClientMessage, DaemonMessage, JobState, Kind, Launch, Run, Status, receive, send,
+    Class, ClientMessage, DaemonMessage, JobState, Kind, Launch, Run, Status, receive, send,
 };
 use std::env;
 use std::ffi::OsString;
@@ -75,7 +75,7 @@ pub struct Demand {
     pub mem_mib: Option<u64>,
 }
 
-/// Runs `argv` as a job of kind `kind` of the daemon at `socket`, once the daemon admits it (a job
+/// Runs `argv` as a job of kind `kind` and class `class` of the daemon at `socket`, once the daemon admits it (a job
 /// that has to wait says why on stderr, when queued and every 15 s). Returns the command's exit code (128+N when a
 /// signal N killed it, 127 when it cannot be started). An `Err` means the command was never run.
 ///
@@ -84,6 +84,7 @@ pub fn run(
     socket: &Path,
     name: Option<String>,
     kind: Kind,
+    class: Class,
     demand: Demand,
     argv: &[OsString],
 ) -> Result<i32, Error> {
@@ -100,6 +101,8 @@ pub fn run(
         cwd: cwd.to_string_lossy().into_owned(),
         cpu: demand.cpu,
         mem_mib: demand.mem_mib,
+        class,
+        submitter: submitter(&cwd).to_string_lossy().into_owned(),
     };
     let mut reply = daemon.ask(&submit)?;
     let (job, unit, launch) = loop {
@@ -123,7 +126,7 @@ pub fn run(
         );
         CANNOT_RUN
     } else {
-        match launch::command(launch, &unit, argv).status() {
+        match launch::command(launch, &unit, class, argv).status() {
             Ok(status) => exit_code(status),
             Err(e) => {
                 eprintln!("taskslash: cannot run {}: {e}", program.display());
@@ -184,10 +187,49 @@ pub fn why(socket: &Path, job: u64) -> Result<Option<(Reason, u64, usize)>, Erro
     }
 }
 
+/// Who submits from `cwd`: the nearest ancestor of it, itself first, with a `.git` entry (a
+/// directory in a clone, a file in a worktree), else `cwd`.
+fn submitter(cwd: &Path) -> &Path {
+    cwd.ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())
+        .unwrap_or(cwd)
+}
+
 /// A shell's exit code for `status`: the code, or 128+N when signal N killed it.
 fn exit_code(status: ExitStatus) -> i32 {
     status
         .code()
         .or_else(|| status.signal().map(|signal| 128 + signal))
         .unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::submitter;
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn the_submitter_is_the_nearest_directory_with_a_git_entry() {
+        let root = std::env::temp_dir().join(format!("tks-{}", std::process::id()));
+        let deep = root.join("wt/a/b");
+        fs::create_dir_all(&deep).unwrap();
+        // No .git under `root`: the cwd itself, unless a directory above `root` has one.
+        let outside = submitter(&deep);
+        assert!(
+            outside == deep || !outside.starts_with(&root),
+            "{outside:?}"
+        );
+        fs::create_dir(root.join(".git")).unwrap();
+        assert_eq!(submitter(&deep), root, "a clone's .git directory");
+        fs::write(root.join("wt/.git"), "gitdir: /elsewhere\n").unwrap();
+        assert_eq!(submitter(&deep), root.join("wt"), "a worktree's .git file");
+        assert_eq!(
+            submitter(&root.join("wt")),
+            root.join("wt"),
+            "the cwd itself counts"
+        );
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(submitter(Path::new("/")), Path::new("/"));
+    }
 }
