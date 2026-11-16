@@ -12,11 +12,22 @@ use std::process::{Command, Stdio};
 /// The slice every scoped job runs under. `systemd-run --slice=` creates it on first use.
 pub const SLICE: &str = "taskslash.slice";
 
-/// `Scope` when `systemd-run --user --scope --quiet -- true` exits 0, else `Plain`. The daemon asks
-/// once, at startup.
+/// What every scoped job's `systemd-run` is given before its unit. `--expand-environment=no`
+/// (systemd 254) keeps it from rewriting `$` in the job's own command (`sh -c 'echo $$'`).
+const SCOPE_ARGS: [&str; 5] = [
+    "--user",
+    "--scope",
+    "--quiet",
+    "--collect",
+    "--expand-environment=no",
+];
+
+/// `Scope` when `systemd-run` with the job's arguments runs `true` and exits 0, else `Plain`. The
+/// daemon asks once, at startup.
 pub fn probe() -> Launch {
     let ok = Command::new("systemd-run")
-        .args(["--user", "--scope", "--quiet", "--", "true"])
+        .args(SCOPE_ARGS)
+        .args(["--", "true"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -37,7 +48,7 @@ pub fn command(launch: Launch, unit: &str, argv: &[OsString]) -> Command {
         Launch::Scope => {
             let mut command = Command::new("systemd-run");
             command
-                .args(["--user", "--scope", "--quiet", "--collect"])
+                .args(SCOPE_ARGS)
                 .arg(format!("--slice={SLICE}"))
                 .arg(format!("--unit={unit}"))
                 .arg("--")
@@ -83,6 +94,7 @@ mod tests {
                 "--scope",
                 "--quiet",
                 "--collect",
+                "--expand-environment=no",
                 "--slice=taskslash.slice",
                 "--unit=taskslash-9-1",
                 "--",

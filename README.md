@@ -7,8 +7,8 @@ them: each command asks it for a slot, and it keeps the queue and the record of 
 
 This version runs each job in its own systemd scope, measures it, and records what it cost, and the
 daemon samples the whole machine once a second. From those records it estimates what each key will
-cost, and it keeps a queue: so far its one rule is that two jobs nobody has run before never start
-together. Admission against the machine's free CPU and memory comes next, from those estimates.
+cost, and a job starts only when its estimate fits in the room the machine has left. A job that
+waits says what it waits for.
 
 ## Use
 
@@ -17,6 +17,9 @@ taskslash daemon                          # run the daemon (normally under syste
 taskslash run -- bun run test             # run a command as a job
 taskslash run --name gate -- sh -c 'exit 3'; echo $?   # 3
 taskslash run --kind browser --name visual -- bun run visual   # a cost class for its defaults
+taskslash run --cpu 4 --mem 3000 -- bun run visual             # say what it costs (threads, MiB)
+taskslash why 7                           # why job 7 waits (or "running")
+taskslash why 7 --json                    # the reason as an object
 taskslash history gate                    # the estimate of "gate", then what its last 20 runs cost
 taskslash history gate --json             # the same, as {"estimate": ..., "runs": [...]}
 taskslash status                          # is this machine busy, and with what
@@ -25,8 +28,8 @@ taskslash status --json                   # the same, as one line of JSON
 
 `taskslash run` runs the command itself, in your directory, with your environment and terminal, and
 exits with its exit code (128+N when signal N killed it, 127 when it cannot be started). With no
-daemon running it does not run the command and exits 1; so do `taskslash history` and
-`taskslash status`.
+daemon running it does not run the command and exits 1; so do `taskslash history`,
+`taskslash status` and `taskslash why`.
 
 ### What a run records
 
@@ -40,7 +43,8 @@ was not measured; a run whose `taskslash run` went away before the command ended
 
 **Measurement needs a systemd user session.** The daemon checks once at startup whether
 `systemd-run --user --scope` works. When it does, every job runs in a transient scope under
-`taskslash.slice`, and the daemon reads the scope's cgroup every 250 ms while it runs. When it does
+`taskslash.slice` (with `--expand-environment=no`, systemd 254 or newer, so `$` in your command is
+left alone), and the daemon reads the scope's cgroup every 250 ms while it runs. When it does
 not (CI, a container, macOS), the daemon logs `taskslash: no systemd user session, jobs run
 unmeasured`, runs jobs as plain children, and records wall time and exit code only. Jobs are
 measured, never capped.
@@ -55,7 +59,8 @@ unset. The socket's directory is created with mode 0700: only you can submit job
 
 `--kind` is a job's cost class: `test`, `typecheck`, `build`, `browser` or `command` (the default).
 It only matters until the key has history. `taskslash history <key>` prints the key's estimate above
-its runs, each figure marked `history` or `default`:
+its runs, each figure marked `history` or `default` (or `given` in `status`, for a run's `--cpu`
+or `--mem`):
 
 | Figure | From the key's runs | Default |
 | --- | --- | --- |
@@ -70,13 +75,50 @@ A run on a starved machine still tells the truth about its memory and bytes writ
 its CPU share or how long it takes, so those two use calm runs only. The kind for the defaults is
 the newest run's.
 
-### Waiting
+### Admission
 
-A key is **seen** once one of its runs has finished (it has an exit code, measured or not). At most
-one job whose key was never seen runs at a time: a second waits until the first ends, and its
-`taskslash run` prints `taskslash: waiting: another never-seen job is running: <key>` on stderr
-once. A seen job never waits for this. A `taskslash run` stopped while it waits leaves the queue
-and its command never runs.
+The daemon decides, for each waiting job in the order they were submitted, whether it starts now.
+Three resources count: CPU (threads), memory (MiB) and disk writes (MiB/s).
+
+- **Budget:** CPU is 85% of `cpu.threads` (the CPUs the daemon may use), memory 80% of
+  `memory.total_mib`, disk writes 150 MiB/s. Override them in the daemon's environment with
+  `TASKSLASH_CPU_SHARE`, `TASKSLASH_MEM_SHARE` and `TASKSLASH_WRITE_MIB_S`.
+- **Committed:** each running job counts at the larger of its estimate and what it uses now (CPU
+  and writes over the last 5 seconds, memory at its peak so far; an unmeasured job counts at its
+  estimate), plus **unmanaged** use: what the machine shows minus what the jobs show, floored at 0,
+  the mean of the last 30 one second samples. Machine CPU is `cpu.busy` times `cpu.threads`,
+  memory `total_mib - available_mib`, writes the sum over the disks.
+- **A job fits** when, for every resource, committed plus its estimate is within the budget.
+- **Gates:** while any holds nothing starts: CPU `some avg10` over 40, memory `some avg10` over 5,
+  I/O `full avg10` over 5 or `some avg10` over 25, `available_mib` under 10% of `total_mib`, a
+  watched mount over 90% used.
+- **Never seen:** a key is seen once one of its runs has finished. At most one job whose key was
+  never seen runs at a time, unless the caller gave both `--cpu` and `--mem`.
+- **Too big to ever fit:** a job whose estimate alone is over a budget starts when no other job is
+  running and no gate holds.
+
+`--cpu <threads>` and `--mem <MiB>` on `run` replace the learned estimate for that run.
+
+A job that waits is told why on stderr when it is queued and every 15 seconds after. The line names
+the first thing that holds it, checked in this order: a gate, the never-seen rule, a resource. A
+resource line lists the running jobs that hold the most of it first:
+
+```
+taskslash: waiting 45s (2nd in line): cpu needs 4.8, free 1.8; held by cli-db:test (job 3), visual (job 5)
+taskslash: waiting 30s (1st in line): cpu pressure 52% over the 40% gate
+```
+
+`taskslash why <job>` prints the same sentence, `running` for a running job, and exits 1 for a job
+the daemon does not hold (an ended job's record is in `history`). With `--json` it prints the
+reason: `{"kind":"resource","resource":"cpu","needs":4.8,"free":1.8,"held_by":[{"job":3,"key":
+"cli-db:test","amount":3.0}]}`, `{"kind":"gate","gate":"cpu_pressure","value":52.0,"limit":40.0}`,
+`{"kind":"never_seen","job":3,"key":"..."}`, or `{"kind":"running"}`. A `taskslash run` stopped
+while it waits leaves the queue and its command never runs.
+
+**A fake machine, for tests.** With `TASKSLASH_FAKE_MACHINE=<file>` in its environment the daemon
+reads the machine from that file (a `machine` object as `status --json` prints it) on every sample
+instead of from `/proc`, keeping the last good reading when the file cannot be read. It exists so
+tests can set the machine's load and pressure; do not use it otherwise.
 
 ### What status shows
 
@@ -97,7 +139,7 @@ running job and one per waiting job.
 | `mounts[]` | `$HOME`, `$TMPDIR` and `/tmp`, one per file system: size, space free to you, and the share used |
 | `load` | `/proc/loadavg`, for people only |
 | `jobs[]` | each running job: `job`, `key`, `kind`, `started_at`, its `cpu_threads` and `mem_mib` now (null until the first reading and always on an unmeasured run), and its `estimate` |
-| `waiting[]` | each waiting job, in queue order: `job`, `key`, `kind`, `waited_s`, `reason` and its `estimate` |
+| `waiting[]` | each waiting job, in queue order: `job`, `key`, `kind`, `waited_s`, `position` (1-based), `reason` (the sentence), `why` (the reason object) and its `estimate` |
 
 Shares and rates are 0 in the first second after the daemon starts, before there are two readings.
 

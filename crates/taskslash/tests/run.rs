@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_taskslash");
 
 /// A directory of its own under the temp dir, holding the socket path. Removed on drop.
@@ -28,6 +30,7 @@ impl Scratch {
             "a unix socket path must stay under 108 bytes: {}",
             socket.display()
         );
+        common::write_machine(&dir.join("machine.json"), 0.0);
         Self { dir, socket }
     }
 
@@ -37,6 +40,7 @@ impl Scratch {
             .args(args)
             .env("TASKSLASH_SOCKET", &self.socket)
             .env("TASKSLASH_DB", self.dir.join("runs.db"))
+            .env("TASKSLASH_FAKE_MACHINE", self.dir.join("machine.json"))
             .stdin(Stdio::null());
         command
     }

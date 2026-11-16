@@ -14,6 +14,9 @@ use std::time::{Duration, Instant, SystemTime};
 const MOUNTS_EVERY: Duration = Duration::from_secs(30);
 const MIB: f64 = (1u64 << 20) as f64;
 
+mod file;
+pub use file::FileSampler;
+
 /// Something that can say what the machine is doing now.
 pub trait MachineSampler: Send {
     fn sample(&mut self) -> MachineSnapshot;

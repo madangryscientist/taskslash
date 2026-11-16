@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_taskslash");
 const MIB: f64 = (1u64 << 20) as f64;
 
@@ -25,6 +27,7 @@ impl Scratch {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("tkh-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
+        common::write_machine(&dir.join("machine.json"), 0.0);
         Self { dir }
     }
 
@@ -34,6 +37,7 @@ impl Scratch {
             .args(args)
             .env("TASKSLASH_SOCKET", self.dir.join("d.sock"))
             .env("TASKSLASH_DB", self.dir.join("runs.db"))
+            .env("TASKSLASH_FAKE_MACHINE", self.dir.join("machine.json"))
             .stdin(Stdio::null());
         command
     }
@@ -114,7 +118,15 @@ impl Drop for Daemon {
 /// Whether this machine can start a transient systemd user scope, asked the way the daemon asks.
 fn has_user_session() -> bool {
     Command::new("systemd-run")
-        .args(["--user", "--scope", "--quiet", "--", "true"])
+        .args([
+            "--user",
+            "--scope",
+            "--quiet",
+            "--collect",
+            "--expand-environment=no",
+            "--",
+            "true",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

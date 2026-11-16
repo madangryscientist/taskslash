@@ -3,17 +3,20 @@
 //! machine once a second, and `status` answers from its latest snapshot.
 
 use crate::Error;
+use crate::admission::Limits;
 use crate::estimate::estimate;
 use crate::launch;
-use crate::protocol::{ClientMessage, DaemonMessage, Kind, Launch, Status, receive, send};
-use crate::sampler::{MachineSampler, MachineSnapshot, ProcSampler};
-use crate::scheduler::{Scheduler, lock};
+use crate::protocol::{
+    ClientMessage, DaemonMessage, JobState, Kind, Launch, Status, receive, send,
+};
+use crate::sampler::{FileSampler, MachineSampler, MachineSnapshot, ProcSampler};
+use crate::scheduler::{Scheduler, Whereabouts, lock};
 use crate::store::Store;
 use std::fs::{self, DirBuilder};
 use std::io::BufReader;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -36,6 +39,8 @@ struct Daemon {
 /// Binds the socket at `path`, opens the database at `db`, and serves until the process is killed.
 pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
     let store = Store::open(db)?;
+    let limits = Limits::from_env()?;
+    let mut machine = sampler()?;
     // Asked before binding, so a daemon that accepts has already logged its launch path.
     let launch = launch::probe();
     let listener = bind(path)?;
@@ -49,13 +54,13 @@ pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
         db.display()
     );
     // The first snapshot is taken before the first connection, so `status` always has one.
-    let mut machine = ProcSampler::new();
+    let first = machine.sample();
     let daemon = Arc::new(Daemon {
         launch,
         store: Mutex::new(store),
         next_job: AtomicU64::new(1),
-        machine: Mutex::new(machine.sample()),
-        scheduler: Mutex::new(Scheduler::default()),
+        scheduler: Mutex::new(Scheduler::new(limits, first.clone())),
+        machine: Mutex::new(first),
     });
     let sampling = Arc::clone(&daemon);
     thread::spawn(move || sampling.sample_forever(machine));
@@ -69,6 +74,18 @@ pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// The real sampler, or the fake one `TASKSLASH_FAKE_MACHINE` names (for tests).
+fn sampler() -> Result<Box<dyn MachineSampler>, Error> {
+    match std::env::var_os("TASKSLASH_FAKE_MACHINE").filter(|v| !v.is_empty()) {
+        Some(file) => {
+            let file = PathBuf::from(file);
+            eprintln!("taskslash: fake machine from {}", file.display());
+            Ok(Box::new(FileSampler::new(file).map_err(Error::new)?))
+        }
+        None => Ok(Box::new(ProcSampler::new())),
+    }
 }
 
 /// Binds `path`, creating its parent with mode 0700 (the socket's permissions are the
@@ -116,8 +133,18 @@ impl Daemon {
                 kind,
                 argv,
                 cwd,
+                cpu,
+                mem_mib,
             })) if !argv.is_empty() => {
-                self.serve_job(&mut reader, &mut writer, name.as_deref(), kind, &argv, &cwd);
+                let submitted = job::Submitted {
+                    name: name.as_deref(),
+                    kind,
+                    argv: &argv,
+                    cwd: &cwd,
+                    cpu,
+                    mem_mib,
+                };
+                self.serve_job(&mut reader, &mut writer, submitted);
             }
             Ok(Some(ClientMessage::Submit { .. })) => {
                 refuse(&mut writer, "submit needs a non-empty argv");
@@ -134,10 +161,13 @@ impl Daemon {
             Ok(Some(ClientMessage::Status)) => {
                 let _ = send(&mut writer, &DaemonMessage::Status(Box::new(self.status())));
             }
+            Ok(Some(ClientMessage::Why { job })) => {
+                let _ = send(&mut writer, &self.why(job));
+            }
             Ok(Some(ClientMessage::Exited { .. })) => {
                 refuse(
                     &mut writer,
-                    "expected submit, history or status, got exited",
+                    "expected submit, history, status or why, got exited",
                 );
             }
             Err(e) => refuse(&mut writer, &format!("bad request: {e}")),
@@ -151,6 +181,28 @@ impl Daemon {
         let kind = runs.first().map_or(Kind::Command, |run| run.kind);
         let estimate = estimate(&store.costs(key)?, kind);
         Ok(DaemonMessage::Runs { estimate, runs })
+    }
+
+    /// Where job `id` is and, when it waits, why.
+    fn why(&self, job: u64) -> DaemonMessage {
+        let (state, waiting) = match self.scheduler().whereabouts(job) {
+            Whereabouts::Waiting(reason, waited_s, position) => {
+                (JobState::Waiting, Some((reason, waited_s, position)))
+            }
+            Whereabouts::Running => (JobState::Running, None),
+            Whereabouts::NotFound => (JobState::NotFound, None),
+        };
+        let (reason, waited_s, position) = match waiting {
+            Some((reason, waited_s, position)) => (Some(reason), Some(waited_s), Some(position)),
+            None => (None, None, None),
+        };
+        DaemonMessage::Why {
+            job,
+            state,
+            reason,
+            waited_s,
+            position,
+        }
     }
 
     fn admit(&self) {
@@ -178,7 +230,7 @@ impl Daemon {
 
     /// Samples the machine on every whole `SAMPLE_EVERY` from now, skipping a deadline already
     /// missed, so the period does not drift by the time a sample takes.
-    fn sample_forever(&self, mut sampler: impl MachineSampler) {
+    fn sample_forever(&self, mut sampler: Box<dyn MachineSampler>) {
         let mut next = Instant::now();
         loop {
             next += SAMPLE_EVERY;

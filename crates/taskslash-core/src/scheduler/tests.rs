@@ -1,8 +1,8 @@
 //! The queue and `admit` against a fake `seen`.
 
 use super::*;
+use crate::admission::tests::machine;
 use crate::estimate::estimate;
-use crate::sampler::{MachineSampler, ProcSampler};
 use std::sync::mpsc::{self, Receiver};
 
 fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<()> {
@@ -12,6 +12,7 @@ fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<()> {
         key: key.to_owned(),
         kind: Kind::Command,
         estimate: estimate(&[], Kind::Command),
+        vouched: false,
     };
     s.submit(job, start);
     started
@@ -20,7 +21,7 @@ fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<()> {
 #[test]
 fn one_never_seen_job_runs_at_a_time_and_seen_ones_pass_it() {
     let seen = |key: &str| key.starts_with("seen");
-    let mut s = Scheduler::default();
+    let mut s = Scheduler::new(Limits::default(), machine());
     let a = submit(&mut s, 1, "new-a");
     let b = submit(&mut s, 2, "new-b");
     let c = submit(&mut s, 3, "seen-c");
@@ -31,11 +32,13 @@ fn one_never_seen_job_runs_at_a_time_and_seen_ones_pass_it() {
         c.try_recv().is_ok(),
         "a seen job behind a waiting one starts"
     );
+    let (reason, _, position) = s.waiting(2).unwrap();
     assert_eq!(
-        s.reason(2).as_deref(),
-        Some("another never-seen job is running: new-a")
+        reason.to_string(),
+        "another never-seen job is running: new-a (job 1)"
     );
-    assert_eq!(s.reason(1), None);
+    assert_eq!(position, 1);
+    assert!(s.waiting(1).is_none());
 
     let (_, waiting) = s.status();
     assert_eq!(waiting.len(), 1);
@@ -49,7 +52,7 @@ fn one_never_seen_job_runs_at_a_time_and_seen_ones_pass_it() {
 
 #[test]
 fn a_job_that_leaves_the_queue_never_starts() {
-    let mut s = Scheduler::default();
+    let mut s = Scheduler::new(Limits::default(), machine());
     let _a = submit(&mut s, 1, "new-a");
     let b = submit(&mut s, 2, "new-b");
     s.admit(|_| false);
@@ -62,9 +65,9 @@ fn a_job_that_leaves_the_queue_never_starts() {
 
 #[test]
 fn a_run_keeps_the_mean_of_the_samples_taken_while_it_ran() {
-    let mut s = Scheduler::default();
+    let mut s = Scheduler::new(Limits::default(), machine());
     let _a = submit(&mut s, 1, "a");
-    let mut machine = ProcSampler::new().sample();
+    let mut machine = machine();
     s.sample(&machine); // before it started: not counted
     s.admit(|_| true);
     for (cpu, mem) in [(10.0, 1.0), (50.0, 0.0), (0.0, 0.5)] {
@@ -86,4 +89,38 @@ fn a_run_keeps_the_mean_of_the_samples_taken_while_it_ran() {
     let _b = submit(&mut s, 2, "b");
     s.admit(|_| true);
     assert_eq!(s.finish(2).unwrap().pressure(), RunPressure::default());
+}
+
+#[test]
+fn one_pass_counts_each_job_it_starts_against_the_next() {
+    // 10 threads: an 8.5 thread budget. Two 4.0 jobs fit, a third does not.
+    let mut s = Scheduler::new(Limits::default(), machine());
+    let started: Vec<Receiver<()>> = (1..=3)
+        .map(|id| {
+            let (start, started) = mpsc::channel();
+            let mut estimate = estimate(&[], Kind::Command);
+            estimate.cpu_threads = 4.0;
+            let job = Job {
+                id,
+                key: format!("k{id}"),
+                kind: Kind::Command,
+                estimate,
+                vouched: true,
+            };
+            s.submit(job, start);
+            started
+        })
+        .collect();
+    s.admit(|_| false);
+    assert!(started[0].try_recv().is_ok());
+    assert!(started[1].try_recv().is_ok(), "vouched: not never seen");
+    assert!(started[2].try_recv().is_err());
+    let (reason, _, position) = s.waiting(3).unwrap();
+    assert_eq!(position, 1);
+    assert!(
+        reason
+            .to_string()
+            .starts_with("cpu needs 4.0, free 0.5; held by"),
+        "{reason}"
+    );
 }

@@ -7,10 +7,12 @@
 //! row of what the job cost when it ends. A thread samples the whole machine once a second for
 //! `taskslash status` and admission.
 //!
-//! A job that may not start yet waits in the daemon's queue. `admit` decides, from each key's
-//! estimate (its past runs, else its kind's defaults); so far its one rule is that at most one job
-//! whose key has never finished a run runs at a time.
+//! A job that may not start yet waits in the daemon's queue. `admit` asks `admission::check` for
+//! each waiting job in submit order: a job starts when no pressure gate holds, it is not a second
+//! never-seen job, and its estimate (its past runs, else its kind's defaults, else what the caller
+//! gave) fits under the budget beside what is committed. A waiting job is told why.
 
+pub mod admission;
 mod client;
 mod daemon;
 pub mod estimate;
@@ -23,7 +25,7 @@ mod scheduler;
 mod socket;
 mod store;
 
-pub use client::{history, run, status};
+pub use client::{Demand, history, run, status, why};
 pub use daemon::serve;
 pub use socket::socket_path;
 pub use store::db_path;
