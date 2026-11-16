@@ -1,0 +1,13 @@
+# A two project moon workspace for the `taskslash moon` tests.
+projects:
+  a: "a"
+  b: "b"
+
+vcs:
+  client: "git"
+  defaultBranch: "main"
+
+pipeline:
+  installDependencies: false
+
+telemetry: false

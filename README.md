@@ -19,6 +19,7 @@ taskslash run --name gate -- sh -c 'exit 3'; echo $?   # 3
 taskslash run --kind browser --name visual -- bun run visual   # a cost class for its defaults
 taskslash run --cpu 4 --mem 3000 -- bun run visual             # say what it costs (threads, MiB)
 taskslash run --class urgent -- bun run test                     # first in line (default: normal)
+taskslash moon :typecheck :test          # moon targets, one job per target
 taskslash why 7                           # why job 7 waits (or "running")
 taskslash why 7 --json                    # the reason as an object
 taskslash history gate                    # the estimate of "gate", then what its last 20 runs cost
@@ -32,13 +33,55 @@ exits with its exit code (128+N when signal N killed it, 127 when it cannot be s
 daemon running it does not run the command and exits 1; so do `taskslash history`,
 `taskslash status` and `taskslash why`.
 
+### moon targets
+
+```bash
+taskslash moon :typecheck :test           # every project's typecheck and test
+taskslash moon cli:test --force           # one target, with moon's cache bypassed
+taskslash moon :test --class urgent       # the jobs' class (default: TASKSLASH_CLASS, else normal)
+```
+
+`taskslash moon` replaces `moon run --concurrency 3 :typecheck :test`. A fixed `--concurrency`
+is blind to the other gates on the machine: three gates at once are nine heavy tasks. Here each
+target is its own job, so the daemon's budget decides how many run at once, across every worktree.
+
+It finds the workspace (the first directory from here up with `.moon/workspace.yml`) and its moon
+(`node_modules/.bin/moon` there, else `moon` on `PATH`), and reads `moon query tasks`. A target is
+`:<task>` (that task in every project that has it) or `<project>:<task>`; anything else, or one that
+matches nothing, is a usage error (exit 2). The requested targets and every target they depend on,
+requested or not, each run **exactly once**, after all their dependencies passed, as
+`moon run <target> --upstream none` (plus `--force` when given), so moon never re-runs a dependency
+TaskSlash already ran. That holds for a task with its cache off too: it runs once, before what needs
+it. A target whose dependency failed, directly or not, is skipped; the others keep running. Each
+job's output is passed through as moon prints it.
+
+Each job is named `<repo>/<target>`, where `<repo>` is the repository's name, the same for every
+worktree of it (`shop` for both `shop` and its worktree `shop.feature-x`), so they share one
+history. Its kind is the task's name when that is `test`, `typecheck` or `build`, else `command`.
+It ends with one line per target, in dependency order:
+
+```
+a:gen pass 0.1s
+b:test pass 0.1s cached
+b:typecheck fail 0.1s
+b:lint skipped -
+```
+
+`cached` marks a target moon replayed from its cache. That run is recorded with `cached` set and its
+moon hash, and is left out of the estimate: replaying a cache costs nothing like the task. Exits 0
+when every target passed, else 1.
+
+A `moon run` typed by hand still works as it always did. The daemon does not see it as a job; it
+is counted as unmanaged load, like anything else on the machine.
+
 ### What a run records
 
 When `taskslash run` ends, the daemon writes a row: the key, the kind, the class, the command, its
 directory, its submitter (below), the start time, wall time, CPU seconds, the peak CPU over any 5 seconds (in threads), peak memory,
 MiB written, the exit code, and the machine's pressure while it ran (`machine_cpu_some`,
 `machine_mem_some`, `machine_io_some`: the mean of the `some avg10` readings taken during the run,
-null when none was). The key is `--name` when given, else the first two words of the command
+null when none was). A `taskslash moon` job also records `cached` (moon replayed it from cache) and
+`moon_hash`; both are null for any other run. The key is `--name` when given, else the first two words of the command
 (`bunx moon`). `taskslash history <key>` prints the newest 20 runs of a key, `-` for a value that
 was not measured; a run whose `taskslash run` went away before the command ended has no exit code.
 
@@ -70,7 +113,8 @@ or `--mem`):
 | `write_mib_s` | the mean of MiB written per second over the newest 10 measured runs | 0 |
 | `duration_s` | the median wall time of the newest 10 calm runs | none |
 
-A run is **measured** when it has CPU seconds, peak memory and an exit code (the scope path), and
+A run is **measured** when it has CPU seconds, peak memory and an exit code (the scope path) and is
+not a moon cache hit, and
 **calm** when it is measured and the machine's CPU `some avg10` during it is known and at most 40.
 A run on a starved machine still tells the truth about its memory and bytes written, but not about
 its CPU share or how long it takes, so those two use calm runs only. The kind for the defaults is

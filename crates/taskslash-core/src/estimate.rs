@@ -23,12 +23,18 @@ pub struct RunCost {
     pub exit_code: Option<i32>,
     /// The mean of the machine's CPU `some avg10` over the run; `None` when no sample fell inside.
     pub machine_cpu_some: Option<f64>,
+    /// moon replayed it from its cache: what it cost is the replay's, not the task's.
+    pub cached: bool,
 }
 
 impl RunCost {
-    /// Measured: CPU seconds, peak memory and an exit code were all recorded.
+    /// Measured: CPU seconds, peak memory and an exit code were all recorded, and it was not a
+    /// cache hit (spike 4.4: a cache hit is not a cost sample).
     fn measured(&self) -> bool {
-        self.cpu_usec.is_some() && self.peak_mem_bytes.is_some() && self.exit_code.is_some()
+        !self.cached
+            && self.cpu_usec.is_some()
+            && self.peak_mem_bytes.is_some()
+            && self.exit_code.is_some()
     }
 
     /// Calm: measured, and the machine's CPU pressure during it is known and at most the gate.

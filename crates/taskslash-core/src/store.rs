@@ -67,6 +67,8 @@ pub struct Finished<'a> {
     pub cost: Cost,
     pub exit_code: Option<i32>,
     pub pressure: RunPressure,
+    pub cached: Option<bool>,
+    pub moon_hash: Option<String>,
 }
 
 pub struct Store {
@@ -113,7 +115,9 @@ impl Store {
                 exit_code INTEGER,
                 machine_cpu_some REAL,
                 machine_mem_some REAL,
-                machine_io_some REAL
+                machine_io_some REAL,
+                cached INTEGER,
+                moon_hash TEXT
             );
             CREATE INDEX IF NOT EXISTS runs_key ON runs (key, started_at);",
         )
@@ -133,10 +137,10 @@ impl Store {
             .execute(
                 "INSERT INTO runs (key, kind, argv, cwd, launch, started_at, wall_ms, cpu_usec,
                     peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code, machine_cpu_some,
-                    machine_mem_some, machine_io_some, class, submitter)
+                    machine_mem_some, machine_io_some, class, submitter, cached, moon_hash)
                  VALUES (?1, ?2, ?3, ?4, ?5,
                     strftime('%Y-%m-%dT%H:%M:%fZ', ?6 / 1000.0, 'unixepoch'),
-                    ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     run.key,
                     run.kind.as_str(),
@@ -155,6 +159,8 @@ impl Store {
                     run.pressure.io,
                     run.class.as_str(),
                     run.submitter,
+                    run.cached,
+                    run.moon_hash,
                 ],
             )
             .map_err(sql)?;
@@ -168,7 +174,7 @@ impl Store {
             .prepare(
                 "SELECT id, key, kind, argv, cwd, launch, started_at, wall_ms, cpu_usec,
                     peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code, machine_cpu_some,
-                    machine_mem_some, machine_io_some, class, submitter
+                    machine_mem_some, machine_io_some, class, submitter, cached, moon_hash
                  FROM runs WHERE key = ?1 ORDER BY started_at DESC, id DESC LIMIT ?2",
             )
             .map_err(sql)?;
@@ -180,14 +186,14 @@ impl Store {
             .map_err(sql)
     }
 
-    /// Every measured run of `key`, newest first, for its estimate. Not capped: the newest 10 calm
+    /// Every measured run of `key`, newest first, for its estimate (which skips the cached ones). Not capped: the newest 10 calm
     /// runs may sit behind any number of starved ones.
     pub fn costs(&self, key: &str) -> Result<Vec<RunCost>, Error> {
         let mut statement = self
             .conn
             .prepare(
                 "SELECT wall_ms, cpu_usec, peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code,
-                    machine_cpu_some
+                    machine_cpu_some, cached
                  FROM runs WHERE key = ?1 AND cpu_usec IS NOT NULL
                     AND peak_mem_bytes IS NOT NULL AND exit_code IS NOT NULL
                  ORDER BY started_at DESC, id DESC",
@@ -203,6 +209,7 @@ impl Store {
                     written_bytes: row.get(4)?,
                     exit_code: row.get(5)?,
                     machine_cpu_some: row.get(6)?,
+                    cached: row.get::<_, Option<bool>>(7)?.unwrap_or(false),
                 })
             })
             .map_err(sql)?
@@ -210,11 +217,13 @@ impl Store {
             .map_err(sql)
     }
 
-    /// Whether `key` is seen: at least one of its runs finished (has an exit code), measured or not.
+    /// Whether `key` is seen: at least one of its runs finished (has an exit code), measured or not,
+    /// and was not a moon cache hit (which says nothing of what the task costs).
     pub fn seen(&self, key: &str) -> Result<bool, Error> {
         self.conn
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM runs WHERE key = ?1 AND exit_code IS NOT NULL)",
+                "SELECT EXISTS (SELECT 1 FROM runs WHERE key = ?1 AND exit_code IS NOT NULL
+                    AND cached IS NOT 1)",
                 params![key],
                 |row| row.get(0),
             )
@@ -250,6 +259,8 @@ fn from_row(row: &Row) -> rusqlite::Result<Run> {
         machine_cpu_some: row.get(13)?,
         machine_mem_some: row.get(14)?,
         machine_io_some: row.get(15)?,
+        cached: row.get(18)?,
+        moon_hash: row.get(19)?,
     })
 }
 

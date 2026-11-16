@@ -140,13 +140,17 @@ impl Daemon {
             unit,
             launch: self.launch,
         };
-        let exit_code = if send(writer, &start).is_ok() {
-            match receive(reader) {
-                Ok(Some(ClientMessage::Exited { job, code })) if job == id => Some(code),
-                _ => None,
-            }
-        } else {
-            None
+        let (exit_code, cached, moon_hash) = match send(writer, &start)
+            .ok()
+            .and_then(|()| receive(reader).ok().flatten())
+        {
+            Some(ClientMessage::Exited {
+                job,
+                code,
+                cached,
+                moon_hash,
+            }) if job == id => (Some(code), cached, moon_hash),
+            _ => (None, None, None),
         };
         let Some(running) = self.scheduler().finish(id) else {
             return;
@@ -170,6 +174,8 @@ impl Daemon {
             cost,
             exit_code,
             pressure: running.pressure(),
+            cached,
+            moon_hash,
         };
         let recorded = self.store().record(&finished);
         // After the row, so a job that finished counts as seen when the next one is considered.

@@ -1,0 +1,149 @@
+{
+  "tasks": {
+    "dashboard": {
+      "generate-routes": {
+        "id": "generate-routes",
+        "target": "dashboard:generate-routes",
+        "deps": [],
+        "options": {
+          "cache": false,
+          "persistent": false,
+          "runInCI": "always",
+          "priority": "normal"
+        },
+        "type": "test"
+      },
+      "test": {
+        "id": "test",
+        "target": "dashboard:test",
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "dashboard:generate-routes",
+            "cacheStrategy": "ignored"
+          }
+        ],
+        "options": {
+          "cache": true,
+          "persistent": false,
+          "runInCI": "always",
+          "priority": "normal"
+        },
+        "type": "test"
+      },
+      "typecheck": {
+        "id": "typecheck",
+        "target": "dashboard:typecheck",
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "dashboard:generate-routes",
+            "cacheStrategy": "ignored"
+          }
+        ],
+        "options": {
+          "cache": true,
+          "persistent": false,
+          "runInCI": "always",
+          "priority": "normal"
+        },
+        "type": "test"
+      }
+    },
+    "admin": {
+      "build": {
+        "id": "build",
+        "target": "admin:build",
+        "deps": [],
+        "options": {
+          "cache": true,
+          "persistent": false,
+          "runInCI": "always",
+          "priority": "normal"
+        },
+        "type": "build"
+      },
+      "generate-routes": {
+        "id": "generate-routes",
+        "target": "admin:generate-routes",
+        "deps": [],
+        "options": {
+          "cache": false,
+          "persistent": false,
+          "runInCI": "always",
+          "priority": "normal"
+        },
+        "type": "test"
+      },
+      "test": {
+        "id": "test",
+        "target": "admin:test",
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "admin:build",
+            "cacheStrategy": "hash"
+          }
+        ],
+        "options": {
+          "cache": true,
+          "persistent": false,
+          "runInCI": "always",
+          "priority": "normal"
+        },
+        "type": "test"
+      },
+      "typecheck": {
+        "id": "typecheck",
+        "target": "admin:typecheck",
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "admin:generate-routes",
+            "cacheStrategy": "ignored"
+          }
+        ],
+        "options": {
+          "cache": true,
+          "persistent": false,
+          "runInCI": "always",
+          "priority": "normal"
+        },
+        "type": "test"
+      }
+    },
+    "cli": {
+      "test": {
+        "id": "test",
+        "target": "cli:test",
+        "deps": [],
+        "options": {
+          "cache": true,
+          "persistent": false,
+          "runInCI": "always",
+          "priority": "normal"
+        },
+        "type": "test"
+      },
+      "typecheck": {
+        "id": "typecheck",
+        "target": "cli:typecheck",
+        "deps": [],
+        "options": {
+          "cache": true,
+          "persistent": false,
+          "runInCI": "always",
+          "priority": "normal"
+        },
+        "type": "test"
+      }
+    }
+  },
+  "options": {
+    "affected": null
+  }
+}

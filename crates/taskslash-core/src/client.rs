@@ -1,5 +1,6 @@
 //! The client side: `taskslash run` asks the daemon for a job, runs the command as this process's
-//! child the way the daemon says, reports how it ended, and returns its exit code;
+//! child the way the daemon says, reports how it ended, and returns its exit code (`taskslash moon`
+//! does the same for many jobs at once, one thread and one connection each);
 //! `taskslash history` asks for a key's recorded runs, `taskslash status` for what is running, and
 //! `taskslash why` why a job waits.
 
@@ -16,7 +17,7 @@ use std::io::{self, BufReader};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::ExitStatus;
+use std::process::{Command, ExitStatus};
 
 /// The exit code when the command cannot be started, as a shell uses.
 const CANNOT_RUN: i32 = 127;
@@ -88,60 +89,120 @@ pub fn run(
     demand: Demand,
     argv: &[OsString],
 ) -> Result<i32, Error> {
-    let mut daemon = Connection::open(socket)?;
     let cwd = env::current_dir()
         .map_err(|e| Error::new(format!("cannot read the current directory: {e}")))?;
-    let submit = ClientMessage::Submit {
+    let job = Job {
         name,
         kind,
-        argv: argv
+        class,
+        demand,
+        argv,
+        cwd: &cwd,
+        label: None,
+    };
+    run_job(socket, &job, |mut command| {
+        command.status().map(|status| (status, Report::default()))
+    })
+    .map(|(code, _)| code)
+}
+
+/// One job to submit: `run`'s arguments, and the directory it runs in.
+pub(crate) struct Job<'a> {
+    pub name: Option<String>,
+    pub kind: Kind,
+    pub class: Class,
+    pub demand: Demand,
+    pub argv: &'a [OsString],
+    pub cwd: &'a Path,
+    /// Put in front of each waiting line, when several jobs of one process wait together.
+    pub label: Option<&'a str>,
+}
+
+/// What the client tells the daemon about a run besides its exit code.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Report {
+    pub cached: Option<bool>,
+    pub moon_hash: Option<String>,
+}
+
+/// Submits `job` on a connection of its own, waits for admission, has `exec` run the prepared
+/// command (in `job.cwd`) to its end, and reports the end to the daemon. Several may run at once,
+/// one per thread. Returns the exit code and `exec`'s report; an `Err` means the command never ran.
+pub(crate) fn run_job(
+    socket: &Path,
+    job: &Job,
+    exec: impl FnOnce(Command) -> io::Result<(ExitStatus, Report)>,
+) -> Result<(i32, Report), Error> {
+    let mut daemon = Connection::open(socket)?;
+    let submit = ClientMessage::Submit {
+        name: job.name.clone(),
+        kind: job.kind,
+        argv: job
+            .argv
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect(),
-        cwd: cwd.to_string_lossy().into_owned(),
-        cpu: demand.cpu,
-        mem_mib: demand.mem_mib,
-        class,
-        submitter: submitter(&cwd).to_string_lossy().into_owned(),
+        cwd: job.cwd.to_string_lossy().into_owned(),
+        cpu: job.demand.cpu,
+        mem_mib: job.demand.mem_mib,
+        class: job.class,
+        submitter: submitter(job.cwd).to_string_lossy().into_owned(),
     };
     let mut reply = daemon.ask(&submit)?;
-    let (job, unit, launch) = loop {
+    let (id, unit, launch) = loop {
         match reply {
             DaemonMessage::Start { job, unit, launch } => break (job, unit, launch),
             DaemonMessage::Waiting {
                 reason,
                 waited_s,
                 position,
-            } => eprintln!("{}", waiting_line(&reason, waited_s, position)),
+            } => {
+                let line = waiting_line(&reason, waited_s, position);
+                match job.label {
+                    Some(label) => eprintln!(
+                        "taskslash: {label}: {}",
+                        line.trim_start_matches("taskslash: ")
+                    ),
+                    None => eprintln!("{line}"),
+                }
+            }
             other => return Err(Error::new(format!("unexpected reply {other:?}"))),
         }
         reply = daemon.next()?;
     };
 
-    let program = Path::new(&argv[0]);
-    let code = if launch == Launch::Scope && !launch::can_start(program) {
+    let program = Path::new(&job.argv[0]);
+    let (code, report) = if launch == Launch::Scope && !launch::can_start(program) {
         eprintln!(
             "taskslash: cannot run {}: no such executable",
             program.display()
         );
-        CANNOT_RUN
+        (CANNOT_RUN, Report::default())
     } else {
-        match launch::command(launch, &unit, class, argv).status() {
-            Ok(status) => exit_code(status),
+        let mut command = launch::command(launch, &unit, job.class, job.argv);
+        command.current_dir(job.cwd);
+        match exec(command) {
+            Ok((status, report)) => (exit_code(status), report),
             Err(e) => {
                 eprintln!("taskslash: cannot run {}: {e}", program.display());
-                CANNOT_RUN
+                (CANNOT_RUN, Report::default())
             }
         }
     };
 
     // The child has run; a daemon that went away meanwhile costs a warning, not its exit code.
-    match daemon.ask(&ClientMessage::Exited { job, code }) {
+    let exited = ClientMessage::Exited {
+        job: id,
+        code,
+        cached: report.cached,
+        moon_hash: report.moon_hash.clone(),
+    };
+    match daemon.ask(&exited) {
         Ok(DaemonMessage::Recorded { .. }) => {}
-        Ok(_) => eprintln!("taskslash: warning: the daemon did not record job {job}"),
-        Err(e) => eprintln!("taskslash: warning: could not report job {job} to the daemon: {e}"),
+        Ok(_) => eprintln!("taskslash: warning: the daemon did not record job {id}"),
+        Err(e) => eprintln!("taskslash: warning: could not report job {id} to the daemon: {e}"),
     }
-    Ok(code)
+    Ok((code, report))
 }
 
 /// The estimate of `key` and its recorded runs, newest first, at most 20.

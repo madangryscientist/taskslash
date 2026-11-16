@@ -20,6 +20,8 @@ mod daemon;
 pub mod estimate;
 mod launch;
 mod measure;
+mod moon;
+mod moon_run;
 pub mod order;
 pub mod procfs;
 pub mod protocol;
@@ -30,23 +32,43 @@ mod store;
 
 pub use client::{Demand, history, run, status, why};
 pub use daemon::serve;
+pub use moon_run::moon;
 pub use socket::socket_path;
 pub use store::db_path;
 
 use std::fmt;
 
-/// A failure the command line prints as `taskslash: <message>` and exits 1 on.
+/// A failure the command line prints as `taskslash: <message>` and exits 1 on, or 2 on a usage
+/// error.
 #[derive(Debug)]
-pub struct Error(String);
+pub struct Error {
+    message: String,
+    usage: bool,
+}
 
 impl Error {
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            usage: false,
+        }
+    }
+
+    /// A usage error: the arguments, or where the command was run, are wrong.
+    pub fn usage(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            usage: true,
+        }
+    }
+
+    pub fn is_usage(&self) -> bool {
+        self.usage
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
