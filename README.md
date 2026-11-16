@@ -227,12 +227,11 @@ Shares and rates are 0 in the first second after the daemon starts, before there
 ### Install the daemon as a systemd user unit
 
 ```bash
-cargo install --locked --path crates/taskslash
-cp crates/taskslash/systemd/taskslash.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now taskslash
+bun scripts/install-service.ts
 journalctl --user -u taskslash -f         # the launch path, then one line per job start and end
 ```
+
+The same command also upgrades: rerun it after pulling a new `main`, and a job running during the restart keeps running but is not recorded.
 
 > **Status: alpha.** Changing fast. Expect breaking changes between versions.
 
