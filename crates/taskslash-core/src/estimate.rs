@@ -48,6 +48,8 @@ impl RunCost {
 pub enum Source {
     History,
     Default,
+    /// The caller gave it (`run --cpu`, `--mem`).
+    Given,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

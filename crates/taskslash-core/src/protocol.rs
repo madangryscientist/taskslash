@@ -1,14 +1,17 @@
 //! The wire protocol: newline delimited JSON on a unix socket, one request per connection.
 //!
-//! A job: the client sends `submit`; the daemon answers `start` (or `error`, then closes), first
-//! sending `waiting` once when the job has to queue. The client runs the command the way `start.launch` says, sends `exited`, and the daemon answers
+//! A job: the client sends `submit`; the daemon answers `start` (or `error`, then closes). A job
+//! that has to queue is sent `waiting` first, when it is queued and every 15 s after. The client
+//! runs the command the way `start.launch` says, sends `exited`, and the daemon answers
 //! `recorded` once the run's row is written. An EOF before `exited` ends the job as dropped, and its
 //! row has no exit code.
 //!
 //! A query: the client sends `history`; the daemon answers `runs` (the key's estimate and its runs)
 //! and closes. Or it sends `status`; the daemon answers `status` (the machine's latest snapshot, the
-//! running jobs and the waiting ones).
+//! running jobs and the waiting ones). Or `why`; the daemon answers `why` (whether the job waits,
+//! runs or is not held, and why it waits).
 
+use crate::admission::Reason;
 use crate::estimate::Estimate;
 use crate::sampler::MachineSnapshot;
 use serde::de::DeserializeOwned;
@@ -86,15 +89,20 @@ impl FromStr for Kind {
 }
 
 /// A message from the command line to the daemon.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Ask to start a job. `argv` has at least one element.
+    /// `cpu` (threads) and `mem_mib`, when given, replace the learned estimate's figures.
     Submit {
         name: Option<String>,
         kind: Kind,
         argv: Vec<String>,
         cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cpu: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mem_mib: Option<u64>,
     },
     /// The job's command has exited with `code`.
     Exited { job: u64, code: i32 },
@@ -102,6 +110,8 @@ pub enum ClientMessage {
     History { key: String },
     /// Ask what the machine and the running jobs are doing.
     Status,
+    /// Ask why job `job` waits.
+    Why { job: u64 },
 }
 
 /// How the client runs a job's command.
@@ -133,16 +143,42 @@ pub enum DaemonMessage {
         unit: String,
         launch: Launch,
     },
-    /// The job is queued, for `reason`; `start` follows when it is admitted.
-    Waiting { reason: String },
+    /// The job is queued, for `reason`, and has waited `waited_s`, `position` (1-based) in the
+    /// queue's order; `start` follows when it is admitted.
+    Waiting {
+        reason: Reason,
+        waited_s: u64,
+        position: usize,
+    },
     /// The job's end is recorded.
     Recorded { job: u64 },
     /// The answer to `history`: the key's estimate and at most 20 runs, newest first.
     Runs { estimate: Estimate, runs: Vec<Run> },
     /// The answer to `status`.
     Status(Box<Status>),
+    /// The answer to `why`: `reason`, `waited_s` and `position` are set when `state` is `waiting`.
+    Why {
+        job: u64,
+        state: JobState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<Reason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        waited_s: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<usize>,
+    },
     /// The request was refused; the daemon closes the connection after this.
     Error { message: String },
+}
+
+/// Where a job is, as `why` answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobState {
+    Waiting,
+    Running,
+    /// The daemon does not hold it: never submitted, or ended (its record is in `history`).
+    NotFound,
 }
 
 /// One recorded run. A cost field is `None` when it was not measured, never 0 for unknown.
@@ -195,14 +231,17 @@ pub struct JobStatus {
     pub estimate: Estimate,
 }
 
-/// A queued job: how long it has waited, and why.
+/// A queued job: how long it has waited, its 1-based place in the queue, and why: `reason` as the
+/// sentence `why` prints, `why` as the object `why --json` prints (`None` before its first pass).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitingStatus {
     pub job: u64,
     pub key: String,
     pub kind: Kind,
     pub waited_s: f64,
+    pub position: usize,
     pub reason: String,
+    pub why: Option<Reason>,
     pub estimate: Estimate,
 }
 
@@ -226,6 +265,13 @@ pub fn history_json(estimate: &Estimate, runs: &[Run]) -> String {
     text
 }
 
+/// A waiting job's reason as one line of JSON, as `taskslash why --json` prints it.
+pub fn reason_json(reason: &Reason) -> String {
+    let mut text = serde_json::to_string(reason).unwrap_or_default();
+    text.push('\n');
+    text
+}
+
 /// Writes one message as a line of JSON.
 pub fn send<T: Serialize>(writer: &mut impl Write, message: &T) -> io::Result<()> {
     let mut line = serde_json::to_string(message)?;
@@ -244,39 +290,4 @@ pub fn receive<T: DeserializeOwned>(reader: &mut impl BufRead) -> io::Result<Opt
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn messages_round_trip_as_tagged_json_lines() {
-        let submit = ClientMessage::Submit {
-            name: Some("probe".into()),
-            kind: Kind::Browser,
-            argv: vec!["sh".into(), "-c".into(), "exit 3".into()],
-            cwd: "/work".into(),
-        };
-        let start = DaemonMessage::Start {
-            job: 3,
-            unit: "taskslash-1-3".into(),
-            launch: Launch::Scope,
-        };
-        let history = ClientMessage::History {
-            key: "probe".into(),
-        };
-        let mut wire = Vec::new();
-        send(&mut wire, &submit).unwrap();
-        send(&mut wire, &start).unwrap();
-        send(&mut wire, &history).unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&wire),
-            "{\"type\":\"submit\",\"name\":\"probe\",\"kind\":\"browser\",\"argv\":[\"sh\",\"-c\",\"exit 3\"],\"cwd\":\"/work\"}\n\
-             {\"type\":\"start\",\"job\":3,\"unit\":\"taskslash-1-3\",\"launch\":\"scope\"}\n\
-             {\"type\":\"history\",\"key\":\"probe\"}\n"
-        );
-        let mut reader = wire.as_slice();
-        assert_eq!(receive(&mut reader).unwrap(), Some(submit));
-        assert_eq!(receive(&mut reader).unwrap(), Some(start));
-        assert_eq!(receive(&mut reader).unwrap(), Some(history));
-        assert_eq!(receive::<DaemonMessage>(&mut reader).unwrap(), None);
-    }
-}
+mod tests;

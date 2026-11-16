@@ -1,11 +1,15 @@
 //! The client side: `taskslash run` asks the daemon for a job, runs the command as this process's
 //! child the way the daemon says, reports how it ended, and returns its exit code;
-//! `taskslash history` asks for a key's recorded runs, and `taskslash status` for what is running.
+//! `taskslash history` asks for a key's recorded runs, `taskslash status` for what is running, and
+//! `taskslash why` why a job waits.
 
 use crate::Error;
+use crate::admission::{Reason, waiting_line};
 use crate::estimate::Estimate;
 use crate::launch;
-use crate::protocol::{ClientMessage, DaemonMessage, Kind, Launch, Run, Status, receive, send};
+use crate::protocol::{
+    ClientMessage, DaemonMessage, JobState, Kind, Launch, Run, Status, receive, send,
+};
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, BufReader};
@@ -64,8 +68,15 @@ impl<'a> Connection<'a> {
     }
 }
 
+/// What the caller says a job costs, replacing the learned estimate: CPU threads and MiB.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Demand {
+    pub cpu: Option<f64>,
+    pub mem_mib: Option<u64>,
+}
+
 /// Runs `argv` as a job of kind `kind` of the daemon at `socket`, once the daemon admits it (a job
-/// that has to wait says why on stderr, once). Returns the command's exit code (128+N when a
+/// that has to wait says why on stderr, when queued and every 15 s). Returns the command's exit code (128+N when a
 /// signal N killed it, 127 when it cannot be started). An `Err` means the command was never run.
 ///
 /// `argv` is passed to the child as it is; the daemon is sent a lossy UTF-8 copy.
@@ -73,6 +84,7 @@ pub fn run(
     socket: &Path,
     name: Option<String>,
     kind: Kind,
+    demand: Demand,
     argv: &[OsString],
 ) -> Result<i32, Error> {
     let mut daemon = Connection::open(socket)?;
@@ -86,12 +98,18 @@ pub fn run(
             .map(|a| a.to_string_lossy().into_owned())
             .collect(),
         cwd: cwd.to_string_lossy().into_owned(),
+        cpu: demand.cpu,
+        mem_mib: demand.mem_mib,
     };
     let mut reply = daemon.ask(&submit)?;
     let (job, unit, launch) = loop {
         match reply {
             DaemonMessage::Start { job, unit, launch } => break (job, unit, launch),
-            DaemonMessage::Waiting { reason } => eprintln!("taskslash: waiting: {reason}"),
+            DaemonMessage::Waiting {
+                reason,
+                waited_s,
+                position,
+            } => eprintln!("{}", waiting_line(&reason, waited_s, position)),
             other => return Err(Error::new(format!("unexpected reply {other:?}"))),
         }
         reply = daemon.next()?;
@@ -139,6 +157,29 @@ pub fn status(socket: &Path) -> Result<Status, Error> {
     let mut daemon = Connection::open(socket)?;
     match daemon.ask(&ClientMessage::Status)? {
         DaemonMessage::Status(status) => Ok(*status),
+        other => Err(Error::new(format!("unexpected reply {other:?}"))),
+    }
+}
+
+/// Where job `job` is: waiting (with its reason, seconds waited and place in line), or running.
+/// An `Err` when the daemon does not hold it.
+pub fn why(socket: &Path, job: u64) -> Result<Option<(Reason, u64, usize)>, Error> {
+    let mut daemon = Connection::open(socket)?;
+    match daemon.ask(&ClientMessage::Why { job })? {
+        DaemonMessage::Why {
+            state: JobState::Waiting,
+            reason: Some(reason),
+            waited_s,
+            position,
+            ..
+        } => Ok(Some((reason, waited_s.unwrap_or(0), position.unwrap_or(1)))),
+        DaemonMessage::Why {
+            state: JobState::Running,
+            ..
+        } => Ok(None),
+        DaemonMessage::Why { .. } => Err(Error::new(format!(
+            "job {job} not found (an ended job's record is in history)"
+        ))),
         other => Err(Error::new(format!("unexpected reply {other:?}"))),
     }
 }

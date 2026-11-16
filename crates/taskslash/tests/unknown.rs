@@ -10,6 +10,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_taskslash");
 
 /// A daemon on a socket and database in a directory of its own; killed and removed on drop.
@@ -25,6 +27,7 @@ impl Daemon {
             .args(args)
             .env("TASKSLASH_SOCKET", dir.join("d.sock"))
             .env("TASKSLASH_DB", dir.join("runs.db"))
+            .env("TASKSLASH_FAKE_MACHINE", dir.join("machine.json"))
             .stdin(Stdio::null());
         command
     }
@@ -32,6 +35,7 @@ impl Daemon {
     fn start(tag: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("tku-{}-{tag}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
+        common::write_machine(&dir.join("machine.json"), 0.0);
         let log = fs::File::create(dir.join("daemon.log")).unwrap();
         let mut child = Self::command(&dir, &["daemon"])
             .stdout(Stdio::null())
@@ -148,16 +152,19 @@ fn two_never_seen_jobs_never_overlap_but_a_seen_one_runs_beside_one() {
 
     let (_, a_err) = finish(a);
     let (_, b_err) = finish(b);
-    let (first, second, second_err) = if b_err.contains("waiting:") {
+    let (first, second, second_err) = if b_err.contains("taskslash: waiting ") {
         ("new-a", "new-b", &b_err)
     } else {
         ("new-b", "new-a", &a_err)
     };
     let first_err = if first == "new-a" { &a_err } else { &b_err };
-    assert!(!first_err.contains("waiting:"), "{first}: {first_err}");
+    assert!(
+        !first_err.contains("taskslash: waiting "),
+        "{first}: {first_err}"
+    );
     assert!(
         second_err.contains(&format!(
-            "taskslash: waiting: another never-seen job is running: {first}"
+            "taskslash: waiting 0s (1st in line): another never-seen job is running: {first} (job "
         )),
         "{second}: {second_err}"
     );
@@ -174,8 +181,8 @@ fn two_never_seen_jobs_never_overlap_but_a_seen_one_runs_beside_one() {
     let c = daemon.spawn("new-c", 2);
     let (_, a_err) = finish(a);
     let (_, c_err) = finish(c);
-    assert!(!a_err.contains("waiting:"), "new-a: {a_err}");
-    assert!(!c_err.contains("waiting:"), "new-c: {c_err}");
+    assert!(!a_err.contains("taskslash: waiting "), "new-a: {a_err}");
+    assert!(!c_err.contains("taskslash: waiting "), "new-c: {c_err}");
     let (a, c) = (daemon.interval("new-a"), daemon.interval("new-c"));
     assert!(
         overlap(a, c),

@@ -21,6 +21,7 @@ const APPEAR: Duration = Duration::from_secs(2);
 const APPEAR_POLL: Duration = Duration::from_millis(20);
 /// The window of the peak CPU figure, in seconds.
 const PEAK_WINDOW: f64 = 5.0;
+const MIB: f64 = (1u64 << 20) as f64;
 
 /// What a job cost. A field is `None` when it was never read (the job ended before its cgroup was
 /// seen, or the file never gave a good value), never 0 for unknown.
@@ -48,11 +49,14 @@ pub fn cgroup_dir(unit: &str) -> Option<PathBuf> {
     )))
 }
 
-/// What a running job is using now: its CPU over the last reading, in threads, and its memory.
+/// What a running job is using now: its CPU and write rate over the last 5 s, its memory now and
+/// its peak memory so far.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Live {
     pub cpu_threads: f64,
     pub mem_mib: u64,
+    pub peak_mem_mib: u64,
+    pub write_mib_s: f64,
 }
 
 /// The latest `Live` reading of a job, shared with whoever asks (`taskslash status`).
@@ -118,6 +122,8 @@ struct Readings {
     cpu: Vec<(f64, u64)>,
     peak_mem: Option<u64>,
     written: Option<u64>,
+    /// `(seconds since sampling began, bytes written so far)`.
+    writes: Vec<(f64, u64)>,
     live: LiveReading,
 }
 
@@ -133,7 +139,6 @@ impl Readings {
         if let Some(peak) = read(&dir.join("memory.peak")).and_then(|s| s.trim().parse().ok()) {
             self.peak_mem = Some(peak);
         }
-        self.publish(dir);
         if let Some(procs) = read(&dir.join("cgroup.procs")) {
             let alive: BTreeMap<u32, u64> = procs
                 .lines()
@@ -144,28 +149,34 @@ impl Readings {
                 })
                 .collect();
             self.written = self.written.max(written_bytes([&alive]));
+            if let Some(written) = self.written {
+                // Like `cpu`, from `(0, 0)`: the job's processes are new and have written nothing.
+                if self.writes.is_empty() {
+                    self.writes.push((0.0, 0));
+                }
+                self.writes.push((t, written));
+            }
         }
+        self.publish(dir);
         dir.is_dir()
     }
 
-    /// Shares what the job uses now: CPU between the last two readings, and `memory.current`.
+    /// Shares what the job uses now: CPU and writes over the last `PEAK_WINDOW`, `memory.current`
+    /// and the peak so far.
     fn publish(&self, dir: &Path) {
-        let [.., (t0, u0), (t1, u1)] = self.cpu[..] else {
+        if self.cpu.len() < 2 {
             return;
-        };
+        }
         let Some(current) =
             read(&dir.join("memory.current")).and_then(|s| s.trim().parse::<u64>().ok())
         else {
             return;
         };
-        let cpu_threads = if t1 > t0 {
-            u1.saturating_sub(u0) as f64 / 1e6 / (t1 - t0)
-        } else {
-            0.0
-        };
         *self.live.lock().unwrap_or_else(PoisonError::into_inner) = Some(Live {
-            cpu_threads,
+            cpu_threads: recent_rate(&self.cpu, PEAK_WINDOW) / 1e6,
             mem_mib: current >> 20,
+            peak_mem_mib: self.peak_mem.unwrap_or(current).max(current) >> 20,
+            write_mib_s: recent_rate(&self.writes, PEAK_WINDOW) / MIB,
         });
     }
 
@@ -211,6 +222,24 @@ pub fn peak_cpu(series: &[(f64, u64)], window: f64) -> Option<f64> {
     Some(peak)
 }
 
+/// The rate of a counter over its newest `window` seconds, from `(t seconds, count)` samples in
+/// time order: the count since the latest sample at least `window` before the newest (or the
+/// first), divided by the larger of their distance and `window`, as `peak_cpu` does. A job younger
+/// than the window is averaged over the whole window (it used nothing before it began), so its
+/// start-up burst over a few milliseconds does not read as several threads. 0 with fewer than two
+/// samples.
+pub fn recent_rate(series: &[(f64, u64)], window: f64) -> f64 {
+    let [_, .., (t1, n1)] = series[..] else {
+        return 0.0;
+    };
+    let &(t0, n0) = series
+        .iter()
+        .rev()
+        .find(|&&(t, _)| t <= t1 - window)
+        .unwrap_or(&series[0]);
+    n1.saturating_sub(n0) as f64 / (t1 - t0).max(window)
+}
+
 /// The bytes a job wrote, from per-sample `{pid: write_bytes}` maps of the processes alive at each
 /// sample: the largest sum at one sample. A process's counter includes children it has reaped, so
 /// summing each pid's last value would count a reaped child's writes twice.
@@ -219,62 +248,4 @@ pub fn written_bytes<'a>(samples: impl IntoIterator<Item = &'a BTreeMap<u32, u64
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const MIB: u64 = 1 << 20;
-
-    #[test]
-    fn peak_cpu_is_the_busiest_5_s() {
-        // 1 thread for 4 s, 3 threads for 6 s, then idle for 4 s; a sample every second.
-        let mut series = vec![(0.0, 0)];
-        let mut usage = 0;
-        for t in 1..=14 {
-            usage += match t {
-                1..=4 => 1_000_000,
-                5..=10 => 3_000_000,
-                _ => 0,
-            };
-            series.push((f64::from(t), usage));
-        }
-        let peak = peak_cpu(&series, 5.0).unwrap();
-        assert!((peak - 3.0).abs() < 1e-9, "{peak}");
-    }
-
-    #[test]
-    fn a_job_shorter_than_the_window_is_averaged_over_the_window() {
-        // 2 threads for 2.5 s: 5 CPU seconds in any 5 s window is 1 thread.
-        let series = [(0.0, 0), (1.0, 2_000_000), (2.5, 5_000_000)];
-        let peak = peak_cpu(&series, 5.0).unwrap();
-        assert!((peak - 1.0).abs() < 1e-9, "{peak}");
-    }
-
-    #[test]
-    fn peak_cpu_needs_two_samples() {
-        assert_eq!(peak_cpu(&[], 5.0), None);
-        assert_eq!(peak_cpu(&[(0.0, 0)], 5.0), None);
-    }
-
-    #[test]
-    fn bytes_written_is_the_largest_alive_sum_not_the_sum_of_lasts() {
-        // pid 10 runs the job; its child 11 writes 200 MiB and is reaped, and 10's counter then
-        // includes the child's 200 MiB. 10 writes 4 MiB of its own at the end.
-        let samples: Vec<BTreeMap<u32, u64>> = vec![
-            BTreeMap::from([(10, 0), (11, 0)]),
-            BTreeMap::from([(10, 0), (11, 120 * MIB)]),
-            BTreeMap::from([(10, 0), (11, 200 * MIB)]),
-            BTreeMap::from([(10, 200 * MIB)]),
-            BTreeMap::from([(10, 204 * MIB)]),
-        ];
-        // The sum of each pid's last value would say 404 MiB.
-        assert_eq!(written_bytes(&samples), Some(204 * MIB));
-        assert_eq!(written_bytes(&[]), None);
-    }
-
-    #[test]
-    fn a_cgroup_never_seen_costs_nulls() {
-        let dir = std::env::temp_dir().join("taskslash-no-such-cgroup.scope");
-        let sampler = Sampler::start(dir);
-        assert_eq!(sampler.finish(), Cost::default());
-    }
-}
+mod tests;

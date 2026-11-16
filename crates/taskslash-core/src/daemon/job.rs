@@ -1,7 +1,8 @@
 //! One job's connection: queued, started, measured and recorded.
 
 use super::Daemon;
-use crate::estimate::estimate;
+use crate::admission::ordinal;
+use crate::estimate::{Source, estimate};
 use crate::measure::{self, Cost, Sampler};
 use crate::protocol::{ClientMessage, DaemonMessage, Kind, Launch, receive, send};
 use crate::scheduler::Job;
@@ -12,49 +13,99 @@ use std::os::unix::net::UnixStream;
 use std::process;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How often a waiting connection checks that its client is still there.
 const WAIT_POLL: Duration = Duration::from_millis(100);
+/// How often a waiting client is told again why.
+const TELL_EVERY: Duration = Duration::from_secs(15);
+
+/// A `submit`: the job's name, kind, command and directory, and what the caller said it costs
+/// (`run --cpu`, `--mem`), each of which replaces the estimate's figure.
+pub(super) struct Submitted<'a> {
+    pub name: Option<&'a str>,
+    pub kind: Kind,
+    pub argv: &'a [String],
+    pub cwd: &'a str,
+    pub cpu: Option<f64>,
+    pub mem_mib: Option<u64>,
+}
 
 impl Daemon {
-    /// A job: queued until `admit` starts it (`waiting` once if it does not start at once), then
+    /// A job: queued until `admit` starts it (`waiting` when queued and every 15 s), then
     /// `start`, sampling while it runs, and a row when `exited` arrives (and `recorded`) or when the
     /// connection drops (no exit code). A connection that drops while waiting leaves the queue.
     pub(super) fn serve_job(
         &self,
         reader: &mut BufReader<UnixStream>,
         writer: &mut UnixStream,
-        name: Option<&str>,
-        kind: Kind,
-        argv: &[String],
-        cwd: &str,
+        submitted: Submitted<'_>,
     ) {
+        let Submitted {
+            name,
+            kind,
+            argv,
+            cwd,
+            cpu,
+            mem_mib,
+        } = submitted;
         let id = self.next_job.fetch_add(1, Ordering::Relaxed);
         let key = store::key(name, argv);
         let costs = self.store().costs(&key).unwrap_or_else(|e| {
             eprintln!("taskslash: job {id} estimated from defaults: {e}");
             Vec::new()
         });
+        let mut estimate = estimate(&costs, kind);
+        if let Some(cpu) = cpu {
+            estimate.cpu_threads = cpu;
+            estimate.source.cpu = Source::Given;
+        }
+        if let Some(mem_mib) = mem_mib {
+            estimate.mem_mib = mem_mib;
+            estimate.source.mem = Source::Given;
+        }
         let job = Job {
             id,
             key: key.clone(),
             kind,
-            estimate: estimate(&costs, kind),
+            estimate,
+            vouched: cpu.is_some() && mem_mib.is_some(),
         };
         let (start, started) = mpsc::channel();
         let waiting = {
             let mut scheduler = self.scheduler();
             scheduler.submit(job, start);
             self.admit_locked(&mut scheduler);
-            scheduler.reason(id)
+            scheduler.waiting(id)
         };
-        if let Some(reason) = waiting {
-            eprintln!("job {id} waiting: {reason}");
-            let _ = send(writer, &DaemonMessage::Waiting { reason });
+        if let Some((reason, _, position)) = waiting {
+            eprintln!("job {id} waiting ({}): {reason}", ordinal(position));
+            let _ = send(
+                writer,
+                &DaemonMessage::Waiting {
+                    reason,
+                    waited_s: 0,
+                    position,
+                },
+            );
+            let mut told = Instant::now();
             loop {
                 match started.recv_timeout(WAIT_POLL) {
                     Ok(()) => break,
+                    Err(RecvTimeoutError::Timeout) if told.elapsed() >= TELL_EVERY => {
+                        told = Instant::now();
+                        let now = self.scheduler().waiting(id);
+                        if let Some((reason, waited_s, position)) = now {
+                            let _ = send(
+                                writer,
+                                &DaemonMessage::Waiting {
+                                    reason,
+                                    waited_s,
+                                    position,
+                                },
+                            );
+                        }
+                    }
                     Err(RecvTimeoutError::Timeout) if hung_up(writer) => {
                         // Not on the queue any more means it started meanwhile: run it as dropped.
                         if self.scheduler().leave(id) {

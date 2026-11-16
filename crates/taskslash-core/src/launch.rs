@@ -8,15 +8,51 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 /// The slice every scoped job runs under. `systemd-run --slice=` creates it on first use.
 pub const SLICE: &str = "taskslash.slice";
 
-/// `Scope` when `systemd-run --user --scope --quiet -- true` exits 0, else `Plain`. The daemon asks
-/// once, at startup.
+/// What every scoped job's `systemd-run` is given before its unit.
+const SCOPE_ARGS: [&str; 4] = ["--user", "--scope", "--quiet", "--collect"];
+/// From systemd 254, `systemd-run` rewrites `$` in the command it runs (`sh -c 'echo $$'` gets
+/// `$`) unless told not to. Older ones neither rewrite nor know the flag.
+const NO_EXPAND: &str = "--expand-environment=no";
+const NO_EXPAND_SINCE: u32 = 254;
+
+/// Whether this machine's `systemd-run` needs `NO_EXPAND`, asked once per process.
+fn expands() -> bool {
+    static EXPANDS: OnceLock<bool> = OnceLock::new();
+    *EXPANDS.get_or_init(|| {
+        Command::new("systemd-run")
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .and_then(|out| systemd_version(&String::from_utf8_lossy(&out.stdout)))
+            .is_some_and(|version| version >= NO_EXPAND_SINCE)
+    })
+}
+
+/// The version in `systemd-run --version`'s first line, `systemd 262 (262.1-1-arch)`.
+fn systemd_version(text: &str) -> Option<u32> {
+    let mut words = text.lines().next()?.split_whitespace();
+    (words.next()? == "systemd").then_some(())?;
+    words.next()?.parse().ok()
+}
+
+/// `SCOPE_ARGS`, and `NO_EXPAND` where this `systemd-run` takes it.
+fn scope_args() -> impl Iterator<Item = &'static str> {
+    SCOPE_ARGS.into_iter().chain(expands().then_some(NO_EXPAND))
+}
+
+/// `Scope` when `systemd-run` with the job's arguments runs `true` and exits 0, else `Plain`. The
+/// daemon asks once, at startup.
 pub fn probe() -> Launch {
     let ok = Command::new("systemd-run")
-        .args(["--user", "--scope", "--quiet", "--", "true"])
+        .args(scope_args())
+        .args(["--", "true"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -37,7 +73,7 @@ pub fn command(launch: Launch, unit: &str, argv: &[OsString]) -> Command {
         Launch::Scope => {
             let mut command = Command::new("systemd-run");
             command
-                .args(["--user", "--scope", "--quiet", "--collect"])
+                .args(scope_args())
                 .arg(format!("--slice={SLICE}"))
                 .arg(format!("--unit={unit}"))
                 .arg("--")
@@ -75,7 +111,13 @@ mod tests {
         let argv: Vec<OsString> = vec!["sh".into(), "-c".into(), "exit 4".into()];
         let command = command(Launch::Scope, "taskslash-9-1", &argv);
         assert_eq!(command.get_program(), "systemd-run");
-        let args: Vec<_> = command.get_args().collect();
+        let mut args: Vec<_> = command.get_args().collect();
+        // Only where this machine's systemd-run takes it.
+        let at = args.iter().position(|a| *a == NO_EXPAND);
+        assert_eq!(at.is_some(), expands(), "{args:?}");
+        if let Some(at) = at {
+            args.remove(at);
+        }
         assert_eq!(
             args,
             [
@@ -91,6 +133,15 @@ mod tests {
                 "exit 4"
             ]
         );
+    }
+
+    #[test]
+    fn the_systemd_version_is_the_first_lines_number() {
+        let text = "systemd 262 (262.1-1-arch)\n+PAM +AUDIT\n";
+        assert_eq!(systemd_version(text), Some(262));
+        assert_eq!(systemd_version("systemd 252 (252.31-1~deb12u1)"), Some(252));
+        assert_eq!(systemd_version("something else 9"), None);
+        assert_eq!(systemd_version(""), None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! The queue and `admit` against a fake `seen`.
 
 use super::*;
+use crate::admission::tests::machine;
 use crate::estimate::estimate;
-use crate::sampler::{MachineSampler, ProcSampler};
 use std::sync::mpsc::{self, Receiver};
 
 fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<()> {
@@ -12,6 +12,7 @@ fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<()> {
         key: key.to_owned(),
         kind: Kind::Command,
         estimate: estimate(&[], Kind::Command),
+        vouched: false,
     };
     s.submit(job, start);
     started
@@ -20,7 +21,7 @@ fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<()> {
 #[test]
 fn one_never_seen_job_runs_at_a_time_and_seen_ones_pass_it() {
     let seen = |key: &str| key.starts_with("seen");
-    let mut s = Scheduler::default();
+    let mut s = Scheduler::new(Limits::default(), machine());
     let a = submit(&mut s, 1, "new-a");
     let b = submit(&mut s, 2, "new-b");
     let c = submit(&mut s, 3, "seen-c");
@@ -31,11 +32,13 @@ fn one_never_seen_job_runs_at_a_time_and_seen_ones_pass_it() {
         c.try_recv().is_ok(),
         "a seen job behind a waiting one starts"
     );
+    let (reason, _, position) = s.waiting(2).unwrap();
     assert_eq!(
-        s.reason(2).as_deref(),
-        Some("another never-seen job is running: new-a")
+        reason.to_string(),
+        "another never-seen job is running: new-a (job 1)"
     );
-    assert_eq!(s.reason(1), None);
+    assert_eq!(position, 1);
+    assert!(s.waiting(1).is_none());
 
     let (_, waiting) = s.status();
     assert_eq!(waiting.len(), 1);
@@ -49,7 +52,7 @@ fn one_never_seen_job_runs_at_a_time_and_seen_ones_pass_it() {
 
 #[test]
 fn a_job_that_leaves_the_queue_never_starts() {
-    let mut s = Scheduler::default();
+    let mut s = Scheduler::new(Limits::default(), machine());
     let _a = submit(&mut s, 1, "new-a");
     let b = submit(&mut s, 2, "new-b");
     s.admit(|_| false);
@@ -62,9 +65,9 @@ fn a_job_that_leaves_the_queue_never_starts() {
 
 #[test]
 fn a_run_keeps_the_mean_of_the_samples_taken_while_it_ran() {
-    let mut s = Scheduler::default();
+    let mut s = Scheduler::new(Limits::default(), machine());
     let _a = submit(&mut s, 1, "a");
-    let mut machine = ProcSampler::new().sample();
+    let mut machine = machine();
     s.sample(&machine); // before it started: not counted
     s.admit(|_| true);
     for (cpu, mem) in [(10.0, 1.0), (50.0, 0.0), (0.0, 0.5)] {
@@ -86,4 +89,81 @@ fn a_run_keeps_the_mean_of_the_samples_taken_while_it_ran() {
     let _b = submit(&mut s, 2, "b");
     s.admit(|_| true);
     assert_eq!(s.finish(2).unwrap().pressure(), RunPressure::default());
+}
+
+#[test]
+fn an_unmeasured_job_is_not_counted_again_as_unmanaged() {
+    // 10 threads, an 8.5 thread budget. A plain job estimated at 4 threads really uses 4, so the
+    // machine shows 4 busy threads; a second 4 thread job still fits (4 + 4 = 8).
+    let mut s = Scheduler::new(Limits::default(), machine());
+    let submit4 = |s: &mut Scheduler, id: u64| {
+        let (start, started) = mpsc::channel();
+        let mut estimate = estimate(&[], Kind::Command);
+        estimate.cpu_threads = 4.0;
+        let job = Job {
+            id,
+            key: format!("k{id}"),
+            kind: Kind::Command,
+            estimate,
+            vouched: true,
+        };
+        s.submit(job, start);
+        started
+    };
+    let first = submit4(&mut s, 1);
+    s.admit(|_| true);
+    assert!(first.try_recv().is_ok());
+    let mut busy = machine();
+    busy.cpu.busy = 0.4;
+    for _ in 0..30 {
+        s.sample(&busy);
+    }
+    let second = submit4(&mut s, 2);
+    s.admit(|_| true);
+    assert!(
+        second.try_recv().is_ok(),
+        "{:?}",
+        s.waiting(2).map(|w| w.0.to_string())
+    );
+}
+
+#[test]
+fn a_measured_job_below_its_estimate_does_not_hide_outside_load() {
+    // A measured job estimated at 4 uses 0.5 now; outside work uses 3.5, so the machine shows 4.
+    // Unmanaged is 3.5, committed 4 + 3.5 = 7.5, and a 4 thread job must wait (11.5 > 8.5).
+    let mut s = Scheduler::new(Limits::default(), machine());
+    let mut estimate = estimate(&[], Kind::Command);
+    estimate.cpu_threads = 4.0;
+    let job = |id: u64| Job {
+        id,
+        key: format!("k{id}"),
+        kind: Kind::Command,
+        estimate: estimate.clone(),
+        vouched: true,
+    };
+    let (start, _first) = mpsc::channel();
+    s.submit(job(1), start);
+    s.admit(|_| true);
+    let live = LiveReading::default();
+    *lock(&live) = Some(Live {
+        cpu_threads: 0.5,
+        mem_mib: 10,
+        peak_mem_mib: 10,
+        write_mib_s: 0.0,
+    });
+    s.set_live(1, live);
+    let mut busy = machine();
+    busy.cpu.busy = 0.4;
+    for _ in 0..30 {
+        s.sample(&busy);
+    }
+    let (start, second) = mpsc::channel();
+    s.submit(job(2), start);
+    s.admit(|_| true);
+    assert!(second.try_recv().is_err());
+    let (reason, ..) = s.waiting(2).unwrap();
+    assert!(
+        reason.to_string().starts_with("cpu needs 4.0, free 1.0"),
+        "{reason}"
+    );
 }
