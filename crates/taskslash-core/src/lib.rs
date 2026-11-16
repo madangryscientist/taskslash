@@ -4,17 +4,20 @@
 //! over a unix socket for a job, runs the command as its own child (in a transient systemd scope
 //! when the machine has a user session), and reports the exit code. The connection stays open for
 //! the job's whole life and is its lease. The daemon measures the scope while it runs and writes a
-//! row of what the job cost when it ends.
+//! row of what the job cost when it ends. A thread samples the whole machine once a second for
+//! `taskslash status` and admission.
 
 mod client;
 mod daemon;
 mod launch;
 mod measure;
+pub mod procfs;
 pub mod protocol;
+pub mod sampler;
 mod socket;
 mod store;
 
-pub use client::{history, run};
+pub use client::{history, run, status};
 pub use daemon::serve;
 pub use socket::socket_path;
 pub use store::db_path;

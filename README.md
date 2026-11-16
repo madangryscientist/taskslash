@@ -5,8 +5,9 @@ started at once (by you, or by coding agents in several worktrees) overload a de
 time out for reasons that have nothing to do with the code. TaskSlash puts a small daemon in front of
 them: each command asks it for a slot, and it keeps the queue and the record of what ran.
 
-This version runs each job in its own systemd scope, measures it, and records what it cost.
-Admission and the queue come next, computed from those records.
+This version runs each job in its own systemd scope, measures it, and records what it cost, and the
+daemon samples the whole machine once a second. Admission and the queue come next, computed from
+those records and readings.
 
 ## Use
 
@@ -16,11 +17,14 @@ taskslash run -- bun run test             # run a command as a job
 taskslash run --name gate -- sh -c 'exit 3'; echo $?   # 3
 taskslash history gate                    # what the last 20 runs of "gate" cost
 taskslash history gate --json             # the same, as a JSON array
+taskslash status                          # is this machine busy, and with what
+taskslash status --json                   # the same, as one line of JSON
 ```
 
 `taskslash run` runs the command itself, in your directory, with your environment and terminal, and
 exits with its exit code (128+N when signal N killed it, 127 when it cannot be started). With no
-daemon running it does not run the command and exits 1; so does `taskslash history`.
+daemon running it does not run the command and exits 1; so do `taskslash history` and
+`taskslash status`.
 
 ### What a run records
 
@@ -42,6 +46,27 @@ The database is SQLite, at `$TASKSLASH_DB`, else `$XDG_STATE_HOME/taskslash/task
 
 The daemon listens on `$TASKSLASH_SOCKET`, or `$XDG_RUNTIME_DIR/taskslash/daemon.sock` when that is
 unset. The socket's directory is created with mode 0700: only you can submit jobs.
+
+### What status shows
+
+`taskslash status` answers from the daemon's latest machine reading, taken once a second (free
+space every 30 seconds), and lists the running jobs with their last live reading. The plain form is
+a few lines: CPU, the `some avg10` pressures, memory, each disk, each mount, then one line per job.
+
+| Field (`--json`) | What it is |
+| --- | --- |
+| `machine.sampled_at` | when the reading was taken, RFC 3339 UTC |
+| `cpu.threads` | the CPUs the daemon may run on (its `Cpus_allowed_list`): the budget jobs can use, which can be fewer than are online |
+| `cpu.threads_online` | every CPU the kernel has online |
+| `cpu.busy` | the busy share (0 to 1) of the `threads` CPUs over the last second, from `/proc/stat`; iowait counts as idle |
+| `*.pressure` | `/proc/pressure/{cpu,memory,io}`: the share of time, in percent, that some (`some`) or all (`full`) runnable work waited, averaged over 10 and 60 seconds. A missing `full` line is 0 |
+| `memory.*_mib` | `/proc/meminfo`: `MemTotal`, `MemAvailable` (what can be handed out without swapping), `SwapTotal`, `SwapFree` |
+| `io.disks[]` | each physical disk in `/sys/block` (not `loop`, `ram`, `zram` or `dm-` devices): `busy` is the share of time it had I/O in flight, `write_mib_s` its write rate |
+| `mounts[]` | `$HOME`, `$TMPDIR` and `/tmp`, one per file system: size, space free to you, and the share used |
+| `load` | `/proc/loadavg`, for people only |
+| `jobs[]` | each running job: `job`, `key`, `started_at`, and its `cpu_threads` and `mem_mib` now, null until the first reading and always on an unmeasured run |
+
+Shares and rates are 0 in the first second after the daemon starts, before there are two readings.
 
 ### Install the daemon as a systemd user unit
 
