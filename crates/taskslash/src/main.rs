@@ -2,7 +2,7 @@
 //!
 //! Exit codes: 0 ok, 1 a failure that is not usage, 2 a usage error. `taskslash run` exits with
 //! its command's code instead. `taskslash history` and `taskslash status` exit 1 when no daemon is
-//! running, as `run` does.
+//! running, as `run` does. `taskslash moon` exits 1 when any target did not pass.
 
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand};
@@ -61,6 +61,26 @@ enum Commands {
         /// The command and its arguments.
         #[arg(required = true, trailing_var_arg = true, value_name = "COMMAND")]
         command: Vec<OsString>,
+    },
+    /// Run moon targets, each as its own job, in dependency order.
+    ///
+    /// Replaces `moon run --concurrency N <targets>`: the daemon decides how many run at once.
+    /// Each target and every target it depends on (requested or not) runs exactly once, after the
+    /// ones it depends on have passed, as `moon run <target> --upstream none`, named
+    /// `<repo>/<target>`. A target whose dependency failed is skipped. Ends with one line per
+    /// target: pass, fail or skipped, its wall time, and `cached` when moon replayed it from cache.
+    /// Exits 0 when every target passed, else 1; 2 when there is no moon workspace at or above the
+    /// current directory or a target is wrong.
+    Moon {
+        /// `:<task>` (that task in every project that has it) or `<project>:<task>`.
+        #[arg(required = true, value_name = "TARGET")]
+        targets: Vec<String>,
+        /// Pass `--force` to every `moon run`, so none is a cache hit.
+        #[arg(long)]
+        force: bool,
+        /// The jobs' priority class, as for `run`. Default: `TASKSLASH_CLASS`, else normal.
+        #[arg(long)]
+        class: Option<Class>,
     },
     /// Show the cost estimate of a key and its recorded runs, newest first (at most 20).
     ///
@@ -124,7 +144,7 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(e) => {
             eprintln!("taskslash: {e}");
-            ExitCode::FAILURE
+            ExitCode::from(if e.is_usage() { 2 } else { 1 })
         }
     }
 }
@@ -143,6 +163,15 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
         } => {
             let demand = taskslash_core::Demand { cpu, mem_mib: mem };
             taskslash_core::run(&socket, name, kind, class(flag), demand, &command)
+        }
+        Commands::Moon {
+            targets,
+            force,
+            class: flag,
+        } => {
+            let cwd = std::env::current_dir()
+                .map_err(|e| Error::new(format!("cannot read the current directory: {e}")))?;
+            taskslash_core::moon(&socket, &cwd, &targets, force, class(flag))
         }
         Commands::Why { job, json } => {
             let text = match (taskslash_core::why(&socket, job)?, json) {

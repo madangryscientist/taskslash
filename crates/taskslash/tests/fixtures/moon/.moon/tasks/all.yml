@@ -1,0 +1,4 @@
+# Every task runs in CI too: moon's affected check would otherwise skip the ones it judges
+# unaffected.
+taskOptions:
+  runInCI: "always"

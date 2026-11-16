@@ -1,0 +1,12 @@
+# `gen` is uncached and appends one line per run, so a test can count how often it ran.
+tasks:
+  gen:
+    script: "echo ran >> gen.log"
+    options:
+      cache: false
+  typecheck:
+    command: "test -f gen.log"
+    deps: ["a:gen"]
+  test:
+    command: "test -f gen.log"
+    deps: ["a:gen"]

@@ -107,8 +107,16 @@ pub enum ClientMessage {
         /// The nearest ancestor of `cwd` (or `cwd`) holding a `.git`, else `cwd`.
         submitter: String,
     },
-    /// The job's command has exited with `code`.
-    Exited { job: u64, code: i32 },
+    /// The job's command has exited with `code`. A moon target's job also says whether moon
+    /// replayed it from cache and the hash moon ran it under.
+    Exited {
+        job: u64,
+        code: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        moon_hash: Option<String>,
+    },
     /// Ask for the recorded runs of `key`, newest first.
     History { key: String },
     /// Ask what the machine and the running jobs are doing.
@@ -210,6 +218,11 @@ pub struct Run {
     pub machine_cpu_some: Option<f64>,
     pub machine_mem_some: Option<f64>,
     pub machine_io_some: Option<f64>,
+    /// Whether moon replayed the run from its cache, so it is not a cost sample; `None` for a
+    /// run that is not a moon target's.
+    pub cached: Option<bool>,
+    /// The hash moon ran the target under; `None` when it gave none.
+    pub moon_hash: Option<String>,
 }
 
 /// `{"estimate":...,"runs":[...]}`, pretty, and a newline, as `taskslash history --json` prints it.

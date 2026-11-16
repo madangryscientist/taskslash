@@ -29,6 +29,8 @@ fn finished<'a>(argv: &'a [String], launch: Launch, at: u64, cost: Cost) -> Fini
         cost,
         exit_code: Some(4),
         pressure: RunPressure::default(),
+        cached: None,
+        moon_hash: None,
     }
 }
 
@@ -131,5 +133,40 @@ fn a_key_is_seen_once_a_run_finished_and_costs_are_its_measured_runs() {
             run.machine_io_some
         ),
         (Some(1.5), Some(0.25), None)
+    );
+}
+
+#[test]
+fn a_cache_hit_and_its_hash_are_recorded_and_read_back() {
+    let store = Store::in_memory();
+    let argv = words(&["moon", "run", "a:test"]);
+    let cost = Cost {
+        cpu_usec: Some(5),
+        peak_cpu_5s: Some(0.5),
+        peak_mem_bytes: Some(6),
+        written_bytes: Some(0),
+    };
+    let mut hit = finished(&argv, Launch::Scope, 2000, cost.clone());
+    hit.cached = Some(true);
+    hit.moon_hash = Some("74ea".into());
+    store.record(&hit).unwrap();
+    assert!(
+        !store.seen("k").unwrap(),
+        "a cache hit does not make a key seen"
+    );
+    store
+        .record(&finished(&argv, Launch::Scope, 1000, cost))
+        .unwrap();
+    assert!(store.seen("k").unwrap());
+    let runs = store.history("k").unwrap();
+    assert_eq!(
+        (runs[0].cached, runs[0].moon_hash.as_deref()),
+        (Some(true), Some("74ea"))
+    );
+    assert_eq!((runs[1].cached, runs[1].moon_hash.as_deref()), (None, None));
+    let costs = store.costs("k").unwrap();
+    assert_eq!(
+        costs.iter().map(|c| c.cached).collect::<Vec<_>>(),
+        [true, false]
     );
 }

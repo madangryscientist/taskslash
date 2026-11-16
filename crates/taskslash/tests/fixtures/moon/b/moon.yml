@@ -1,0 +1,9 @@
+# `typecheck` fails, so `lint`, which depends on it, is skipped.
+tasks:
+  test:
+    command: "true"
+  typecheck:
+    command: "false"
+  lint:
+    command: "true"
+    deps: ["b:typecheck"]

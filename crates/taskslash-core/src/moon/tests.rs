@@ -1,0 +1,185 @@
+//! The workspace, the query and the graph against a trimmed copy of a real `moon query tasks`
+//! (moon 2.6.5): three projects, an uncached generator two tasks share, and a test on a build.
+
+use super::*;
+
+const QUERY: &str = include_str!("query.json");
+
+fn targets(nodes: &[Node]) -> Vec<&str> {
+    nodes.iter().map(|n| n.target.as_str()).collect()
+}
+
+fn ask(requested: &[&str]) -> Result<Vec<Node>, Error> {
+    let requested: Vec<String> = requested.iter().map(|&t| t.to_owned()).collect();
+    graph(&parse(QUERY).unwrap(), &requested)
+}
+
+fn task(target: &str, deps: &[&str]) -> Task {
+    let (project, task) = target.split_once(':').unwrap();
+    Task {
+        project: project.into(),
+        task: task.into(),
+        target: target.into(),
+        deps: deps.iter().map(|&d| d.to_owned()).collect(),
+    }
+}
+
+#[test]
+fn the_query_is_read_by_project_then_task() {
+    let tasks = parse(QUERY).unwrap();
+    let all: Vec<&str> = tasks.iter().map(|t| t.target.as_str()).collect();
+    assert_eq!(
+        all,
+        [
+            "admin:build",
+            "admin:generate-routes",
+            "admin:test",
+            "admin:typecheck",
+            "cli:test",
+            "cli:typecheck",
+            "dashboard:generate-routes",
+            "dashboard:test",
+            "dashboard:typecheck",
+        ]
+    );
+    let test = tasks.iter().find(|t| t.target == "dashboard:test").unwrap();
+    assert_eq!(
+        (test.project.as_str(), test.task.as_str()),
+        ("dashboard", "test")
+    );
+    assert_eq!(test.deps, ["dashboard:generate-routes"]);
+    assert!(parse("{\"tasks\": 3}").is_err());
+}
+
+#[test]
+fn a_bare_task_is_every_project_that_has_it_and_its_deps_come_first() {
+    let nodes = ask(&[":test"]).unwrap();
+    assert_eq!(
+        targets(&nodes),
+        [
+            "admin:build",
+            "cli:test",
+            "dashboard:generate-routes",
+            "admin:test",
+            "dashboard:test",
+        ]
+    );
+    // Each node's deps point at nodes before it.
+    for (i, node) in nodes.iter().enumerate() {
+        assert!(node.deps.iter().all(|&d| d < i), "{node:?}");
+    }
+    assert_eq!(nodes[3].deps, [0], "admin:test on admin:build");
+    assert_eq!(nodes[4].deps, [2], "dashboard:test on the routes");
+}
+
+#[test]
+fn a_shared_dependency_is_one_node() {
+    let nodes = ask(&[":typecheck", ":test", "dashboard:test"]).unwrap();
+    let routes = nodes
+        .iter()
+        .filter(|n| n.target == "dashboard:generate-routes")
+        .count();
+    assert_eq!(routes, 1);
+    assert_eq!(nodes.len(), 9, "{:?}", targets(&nodes));
+}
+
+#[test]
+fn a_project_target_is_exactly_that_one_plus_what_it_needs() {
+    let nodes = ask(&["admin:test"]).unwrap();
+    assert_eq!(targets(&nodes), ["admin:build", "admin:test"]);
+    assert_eq!(nodes[1].deps, [0]);
+    assert_eq!(
+        (nodes[1].project.as_str(), nodes[1].task.as_str()),
+        ("admin", "test")
+    );
+}
+
+#[test]
+fn a_target_that_is_malformed_or_matches_nothing_is_a_usage_error() {
+    for bad in [
+        "test",
+        ":",
+        "cli:",
+        "#tag:test",
+        "^:build",
+        "a:b:c",
+        ":lint",
+        "nope:test",
+    ] {
+        let e = ask(&[bad]).unwrap_err();
+        assert!(e.is_usage(), "{bad}: {e}");
+        assert!(e.to_string().contains(bad), "{bad}: {e}");
+    }
+}
+
+#[test]
+fn a_cycle_is_an_error_not_a_hang() {
+    let tasks = [
+        task("p:a", &["p:b"]),
+        task("p:b", &["p:c"]),
+        task("p:c", &["p:a"]),
+        task("p:d", &[]),
+    ];
+    let e = graph(&tasks, &[":a".to_owned(), ":d".to_owned()]).unwrap_err();
+    assert!(!e.is_usage());
+    assert_eq!(
+        e.to_string(),
+        "moon reports a dependency cycle among p:a, p:b, p:c"
+    );
+}
+
+#[test]
+fn a_dependency_moon_does_not_list_is_an_error() {
+    let e = graph(&[task("p:a", &["q:gone"])], &["p:a".to_owned()]).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "p:a depends on q:gone, which moon does not list"
+    );
+}
+
+#[test]
+fn the_kind_comes_from_the_task_name() {
+    assert_eq!(kind("test"), Kind::Test);
+    assert_eq!(kind("typecheck"), Kind::Typecheck);
+    assert_eq!(kind("build"), Kind::Build);
+    assert_eq!(kind("generate-routes"), Kind::Command);
+    assert_eq!(kind("lint"), Kind::Command);
+}
+
+#[test]
+fn the_root_and_the_repository_name() {
+    let base = std::env::temp_dir().join(format!("tks-moon-{}", std::process::id()));
+    let main = base.join("shop");
+    let wt = base.join("shop.feature-x");
+    fs::create_dir_all(main.join(".git/worktrees/shop.feature-x")).unwrap();
+    fs::create_dir_all(main.join(".moon")).unwrap();
+    fs::write(main.join(WORKSPACE_FILE), "projects: {}\n").unwrap();
+    fs::create_dir_all(wt.join("apps/cli")).unwrap();
+    fs::create_dir_all(wt.join(".moon")).unwrap();
+    fs::write(wt.join(WORKSPACE_FILE), "projects: {}\n").unwrap();
+    let gitdir = main.join(".git/worktrees/shop.feature-x");
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+
+    assert_eq!(find_root(&wt.join("apps/cli")), Some(wt.as_path()));
+    assert_eq!(find_root(&main), Some(main.as_path()));
+    assert_eq!(repo_name(&main), "shop");
+    assert_eq!(
+        repo_name(&wt),
+        "shop",
+        "a worktree is named for its main checkout"
+    );
+
+    // A gitdir that is not a worktree's (a submodule's) leaves the root's own name.
+    let sub = base.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join(".git"), "gitdir: ../shop/.git/modules/sub\n").unwrap();
+    assert_eq!(repo_name(&sub), "sub");
+    assert_eq!(repo_name(&base.join("none")), "none", "no .git at all");
+
+    // node_modules' moon first.
+    let bin = main.join("node_modules/.bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("moon"), "").unwrap();
+    assert_eq!(moon_binary(&main).unwrap(), bin.join("moon"));
+    fs::remove_dir_all(&base).unwrap();
+}

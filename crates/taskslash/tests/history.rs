@@ -273,10 +273,11 @@ fn plain_history_prints_a_header_and_a_line_per_run() {
             "peak_cpu_5s",
             "peak_mem_mib",
             "written_mib",
-            "exit"
+            "exit",
+            "cached"
         ]
     );
-    // Newest first.
-    assert!(lines[3].ends_with(" 3"), "{text}");
-    assert!(lines[4].ends_with(" 0"), "{text}");
+    // Newest first; `-` in `cached` for a run that is not a moon target's.
+    assert!(lines[3].ends_with(" 3       -"), "{text}");
+    assert!(lines[4].ends_with(" 0       -"), "{text}");
 }

@@ -12,6 +12,7 @@ fn run(wall: i64, cpu_s: f64, peak: f64, mem: i64, written: i64, some: Option<f6
         written_bytes: Some(written * MIB),
         exit_code: Some(0),
         machine_cpu_some: some,
+        cached: false,
     }
 }
 
@@ -155,4 +156,33 @@ fn all_starved_runs_feed_memory_and_io_only() {
         }
     );
     assert_eq!((got.samples.measured, got.samples.calm), (2, 0));
+}
+
+/// A cache hit costs what moon's replay cost, not the task: it feeds no figure (spike 4.4).
+#[test]
+fn a_cache_hit_is_not_a_cost_sample() {
+    let mut hit = run(200, 0.1, 0.2, 40, 0, Some(0.0));
+    hit.cached = true;
+    let real = run(4000, 8.0, 2.5, 500, 40, Some(0.0));
+    let both = estimate(&[hit.clone(), real.clone()], Kind::Test);
+    assert_eq!(
+        both,
+        estimate(&[real], Kind::Test),
+        "the hit changes nothing"
+    );
+    assert_eq!(
+        both.samples,
+        Samples {
+            measured: 1,
+            calm: 1
+        }
+    );
+    assert_eq!((both.cpu_threads, both.mem_mib), (2.0, 600));
+
+    let only_hits = estimate(&[hit.clone(), hit], Kind::Typecheck);
+    assert_eq!(
+        only_hits,
+        estimate(&[], Kind::Typecheck),
+        "the kind's defaults"
+    );
 }

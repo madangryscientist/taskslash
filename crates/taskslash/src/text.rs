@@ -100,14 +100,21 @@ pub fn estimate_text(e: &Estimate) -> String {
 pub fn table(runs: &[Run]) -> String {
     const MIB: f64 = (1u64 << 20) as f64;
     let mut out = format!(
-        "{:<24}  {:>8}  {:>8}  {:>11}  {:>12}  {:>11}  {:>4}\n",
-        "started_at", "wall", "cpu_s", "peak_cpu_5s", "peak_mem_mib", "written_mib", "exit"
+        "{:<24}  {:>8}  {:>8}  {:>11}  {:>12}  {:>11}  {:>4}  {:>6}\n",
+        "started_at",
+        "wall",
+        "cpu_s",
+        "peak_cpu_5s",
+        "peak_mem_mib",
+        "written_mib",
+        "exit",
+        "cached"
     );
     for run in runs {
         let or_dash = |v: Option<String>| v.unwrap_or_else(|| "-".to_owned());
         let mib = |v: Option<i64>| or_dash(v.map(|b| format!("{:.1}", b as f64 / MIB)));
         out.push_str(&format!(
-            "{:<24}  {:>8}  {:>8}  {:>11}  {:>12}  {:>11}  {:>4}\n",
+            "{:<24}  {:>8}  {:>8}  {:>11}  {:>12}  {:>11}  {:>4}  {:>6}\n",
             run.started_at,
             format!("{:.1}s", run.wall_ms as f64 / 1000.0),
             or_dash(run.cpu_usec.map(|u| format!("{:.2}", u as f64 / 1e6))),
@@ -115,6 +122,7 @@ pub fn table(runs: &[Run]) -> String {
             mib(run.peak_mem_bytes),
             mib(run.written_bytes),
             or_dash(run.exit_code.map(|c| c.to_string())),
+            or_dash(run.cached.map(|c| if c { "yes" } else { "no" }.to_owned())),
         ));
     }
     out
@@ -147,12 +155,23 @@ mod tests {
             machine_cpu_some: None,
             machine_mem_some: None,
             machine_io_some: None,
+            cached: None,
+            moon_hash: None,
         };
         let text = table(&[run]);
         let line: Vec<&str> = text.lines().nth(1).unwrap().split_whitespace().collect();
         assert_eq!(
             line,
-            ["2026-11-16T02:17:44.464Z", "1.2s", "-", "-", "-", "-", "4"]
+            [
+                "2026-11-16T02:17:44.464Z",
+                "1.2s",
+                "-",
+                "-",
+                "-",
+                "-",
+                "4",
+                "-"
+            ]
         );
     }
 
