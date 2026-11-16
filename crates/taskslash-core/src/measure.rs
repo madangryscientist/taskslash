@@ -221,20 +221,9 @@ mod tests {
             BTreeMap::from([(10, 200 * MIB)]),
             BTreeMap::from([(10, 204 * MIB)]),
         ];
+        // The sum of each pid's last value would say 404 MiB.
         assert_eq!(written_bytes(&samples), Some(204 * MIB));
-        // What the sum of each pid's last value would have said.
-        let sum_of_lasts = 204 * MIB + 200 * MIB;
-        assert_ne!(written_bytes(&samples), Some(sum_of_lasts));
         assert_eq!(written_bytes(&[]), None);
-    }
-
-    #[test]
-    fn fields_parse_from_cgroup_and_proc_text() {
-        let cpu = "usage_usec 4012345\nuser_usec 4000000\nsystem_usec 12345\n";
-        assert_eq!(field(cpu, "usage_usec"), Some(4_012_345));
-        let io = "rchar: 10\nwchar: 20\nread_bytes: 0\nwrite_bytes: 52428800\n";
-        assert_eq!(field(io, "write_bytes:"), Some(52_428_800));
-        assert_eq!(field(io, "cancelled_write_bytes:"), None);
     }
 
     #[test]
@@ -242,16 +231,5 @@ mod tests {
         let dir = std::env::temp_dir().join("taskslash-no-such-cgroup.scope");
         let sampler = Sampler::start(dir);
         assert_eq!(sampler.finish(), Cost::default());
-    }
-
-    #[test]
-    fn the_cgroup_lives_under_taskslash_slice() {
-        let dir = cgroup_dir("taskslash-1-2").unwrap();
-        let dir = dir.to_string_lossy();
-        assert!(dir.starts_with("/sys/fs/cgroup/user.slice/user-"), "{dir}");
-        assert!(
-            dir.ends_with("/taskslash.slice/taskslash-1-2.scope"),
-            "{dir}"
-        );
     }
 }

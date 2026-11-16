@@ -3,6 +3,7 @@
 use crate::Error;
 use crate::measure::Cost;
 use crate::protocol::{Launch, Run};
+use rusqlite::types::Type;
 use rusqlite::{Connection, Row, params};
 use std::env;
 use std::fs::DirBuilder;
@@ -153,18 +154,18 @@ impl Store {
 }
 
 fn from_row(row: &Row) -> rusqlite::Result<Run> {
+    // A cell that does not parse fails the query by name rather than reading as another run.
+    let bad = |column: usize, e: serde_json::Error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(e))
+    };
     let argv: String = row.get(2)?;
     let launch: String = row.get(4)?;
     Ok(Run {
         id: row.get(0)?,
         key: row.get(1)?,
-        argv: serde_json::from_str(&argv).unwrap_or_default(),
+        argv: serde_json::from_str(&argv).map_err(|e| bad(2, e))?,
         cwd: row.get(3)?,
-        launch: if launch == "scope" {
-            Launch::Scope
-        } else {
-            Launch::Plain
-        },
+        launch: serde_json::from_value(launch.into()).map_err(|e| bad(4, e))?,
         started_at: row.get(5)?,
         wall_ms: row.get(6)?,
         cpu_usec: row.get(7)?,

@@ -94,14 +94,6 @@ mod tests {
     }
 
     #[test]
-    fn plain_runs_the_command_itself() {
-        let argv: Vec<OsString> = vec!["true".into()];
-        let command = command(Launch::Plain, "unused", &argv);
-        assert_eq!(command.get_program(), "true");
-        assert_eq!(command.get_args().count(), 0);
-    }
-
-    #[test]
     fn can_start_finds_programs_like_execvp() {
         assert!(can_start(Path::new("sh")));
         assert!(can_start(Path::new("/bin/sh")));

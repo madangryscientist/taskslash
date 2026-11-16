@@ -71,7 +71,7 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
                 table(&runs)
             };
             write!(io::stdout(), "{text}")
-                .map_err(|e| Error::from(format!("cannot write the runs: {e}")))?;
+                .map_err(|e| Error::new(format!("cannot write the runs: {e}")))?;
             Ok(0)
         }
     }

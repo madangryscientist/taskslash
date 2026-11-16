@@ -26,14 +26,8 @@ use std::fmt;
 pub struct Error(String);
 
 impl Error {
-    fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
-    }
-}
-
-impl From<String> for Error {
-    fn from(message: String) -> Self {
-        Self(message)
     }
 }
 

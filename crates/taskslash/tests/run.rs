@@ -36,6 +36,7 @@ impl Scratch {
         command
             .args(args)
             .env("TASKSLASH_SOCKET", &self.socket)
+            .env("TASKSLASH_DB", self.dir.join("runs.db"))
             .stdin(Stdio::null());
         command
     }
