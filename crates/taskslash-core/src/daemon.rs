@@ -160,7 +160,12 @@ impl Daemon {
     /// Admits with the scheduler already locked; reads the store for whether a key is seen. A key
     /// whose history cannot be read counts as never seen.
     fn admit_locked(&self, scheduler: &mut Scheduler) {
-        scheduler.admit(|key| self.store().seen(key).unwrap_or(false));
+        scheduler.admit(|key| {
+            self.store().seen(key).unwrap_or_else(|e| {
+                eprintln!("taskslash: {key} counted as never seen: {e}");
+                false
+            })
+        });
     }
 
     fn scheduler(&self) -> MutexGuard<'_, Scheduler> {

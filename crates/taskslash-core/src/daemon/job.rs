@@ -32,7 +32,10 @@ impl Daemon {
     ) {
         let id = self.next_job.fetch_add(1, Ordering::Relaxed);
         let key = store::key(name, argv);
-        let costs = self.store().costs(&key).unwrap_or_default();
+        let costs = self.store().costs(&key).unwrap_or_else(|e| {
+            eprintln!("taskslash: job {id} estimated from defaults: {e}");
+            Vec::new()
+        });
         let job = Job {
             id,
             key: key.clone(),
@@ -132,5 +135,6 @@ fn hung_up(stream: &UnixStream) -> bool {
     };
     // SAFETY: `fd` is one valid `pollfd` for the duration of the call, and the timeout is 0.
     let ready = unsafe { libc::poll(&raw mut fd, 1, 0) };
-    ready != 0
+    // -1 (EINTR and the like) is not a hang up; the next poll asks again.
+    ready > 0
 }

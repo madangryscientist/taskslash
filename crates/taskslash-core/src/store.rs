@@ -14,8 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How many runs `history` returns.
 pub const HISTORY_LIMIT: usize = 20;
-/// How many measured runs the estimate is given (it reads at most the newest 10 calm ones).
-const COSTS_LIMIT: i64 = 100;
 
 /// `$TASKSLASH_DB` when set, else `$XDG_STATE_HOME/taskslash/taskslash.db`, else
 /// `~/.local/state/taskslash/taskslash.db`.
@@ -176,7 +174,8 @@ impl Store {
             .map_err(sql)
     }
 
-    /// The newest measured runs of `key` (at most 100), newest first, for its estimate.
+    /// Every measured run of `key`, newest first, for its estimate. Not capped: the newest 10 calm
+    /// runs may sit behind any number of starved ones.
     pub fn costs(&self, key: &str) -> Result<Vec<RunCost>, Error> {
         let mut statement = self
             .conn
@@ -185,11 +184,11 @@ impl Store {
                     machine_cpu_some
                  FROM runs WHERE key = ?1 AND cpu_usec IS NOT NULL
                     AND peak_mem_bytes IS NOT NULL AND exit_code IS NOT NULL
-                 ORDER BY started_at DESC, id DESC LIMIT ?2",
+                 ORDER BY started_at DESC, id DESC",
             )
             .map_err(sql)?;
         statement
-            .query_map(params![key, COSTS_LIMIT], |row| {
+            .query_map(params![key], |row| {
                 Ok(RunCost {
                     wall_ms: row.get(0)?,
                     cpu_usec: row.get(1)?,

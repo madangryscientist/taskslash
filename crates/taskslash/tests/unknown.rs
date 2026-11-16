@@ -188,18 +188,23 @@ fn two_never_seen_jobs_never_overlap_but_a_seen_one_runs_beside_one() {
 fn a_run_killed_while_waiting_leaves_the_queue_and_never_starts() {
     let daemon = Daemon::start("drop");
     let a = daemon.spawn("new-a", 2);
+    // b submits only once a runs, so b is the one that queues.
+    daemon.wait_for(3, |s| s["jobs"].as_array().is_some_and(|j| j.len() == 1));
     let mut b = daemon.spawn("new-b", 0);
     daemon.wait_for(3, |s| s["waiting"].as_array().is_some_and(|w| w.len() == 1));
     b.kill().unwrap();
     b.wait().unwrap();
     let status = daemon.wait_for(3, |s| s["waiting"] == serde_json::json!([]));
-    assert_eq!(status["jobs"].as_array().map(Vec::len), Some(1), "{status}");
+    assert_eq!(status["jobs"][0]["key"], "new-a", "{status}");
     finish(a);
-    assert!(daemon.log().contains("left the queue"), "{}", daemon.log());
-    // Whichever of the two was queued never ran its command.
-    let ran = ["new-a", "new-b"]
-        .iter()
-        .filter(|n| daemon.dir.join(format!("{n}.times")).exists())
-        .count();
-    assert_eq!(ran, 1, "{}", daemon.log());
+    assert!(
+        daemon.log().contains("job 2 left the queue"),
+        "{}",
+        daemon.log()
+    );
+    assert!(
+        !daemon.dir.join("new-b.times").exists(),
+        "new-b ran: {}",
+        daemon.log()
+    );
 }

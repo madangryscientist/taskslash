@@ -92,7 +92,6 @@ pub enum ClientMessage {
     /// Ask to start a job. `argv` has at least one element.
     Submit {
         name: Option<String>,
-        #[serde(default)]
         kind: Kind,
         argv: Vec<String>,
         cwd: String,
