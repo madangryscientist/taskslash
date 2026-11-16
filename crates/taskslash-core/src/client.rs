@@ -3,8 +3,9 @@
 //! `taskslash history` asks for a key's recorded runs, and `taskslash status` for what is running.
 
 use crate::Error;
+use crate::estimate::Estimate;
 use crate::launch;
-use crate::protocol::{ClientMessage, DaemonMessage, Launch, Run, Status, receive, send};
+use crate::protocol::{ClientMessage, DaemonMessage, Kind, Launch, Run, Status, receive, send};
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, BufReader};
@@ -43,11 +44,13 @@ impl<'a> Connection<'a> {
 
     /// Sends `message` and reads the reply.
     fn ask(&mut self, message: &ClientMessage) -> Result<DaemonMessage, Error> {
-        let socket = self.socket;
-        let lost =
-            |e: io::Error| Error::new(format!("lost the daemon at {}: {e}", socket.display()));
-        send(&mut self.writer, message).map_err(lost)?;
-        match receive(&mut self.reader).map_err(lost)? {
+        send(&mut self.writer, message).map_err(|e| self.lost(e))?;
+        self.next()
+    }
+
+    /// Reads the next message from the daemon.
+    fn next(&mut self) -> Result<DaemonMessage, Error> {
+        match receive(&mut self.reader).map_err(|e| self.lost(e))? {
             Some(DaemonMessage::Error { message }) => {
                 Err(Error::new(format!("the daemon refused: {message}")))
             }
@@ -55,27 +58,43 @@ impl<'a> Connection<'a> {
             None => Err(Error::new("the daemon closed the connection")),
         }
     }
+
+    fn lost(&self, e: io::Error) -> Error {
+        Error::new(format!("lost the daemon at {}: {e}", self.socket.display()))
+    }
 }
 
-/// Runs `argv` as a job of the daemon at `socket`. Returns the command's exit code (128+N when a
+/// Runs `argv` as a job of kind `kind` of the daemon at `socket`, once the daemon admits it (a job
+/// that has to wait says why on stderr, once). Returns the command's exit code (128+N when a
 /// signal N killed it, 127 when it cannot be started). An `Err` means the command was never run.
 ///
 /// `argv` is passed to the child as it is; the daemon is sent a lossy UTF-8 copy.
-pub fn run(socket: &Path, name: Option<String>, argv: &[OsString]) -> Result<i32, Error> {
+pub fn run(
+    socket: &Path,
+    name: Option<String>,
+    kind: Kind,
+    argv: &[OsString],
+) -> Result<i32, Error> {
     let mut daemon = Connection::open(socket)?;
     let cwd = env::current_dir()
         .map_err(|e| Error::new(format!("cannot read the current directory: {e}")))?;
     let submit = ClientMessage::Submit {
         name,
+        kind,
         argv: argv
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect(),
         cwd: cwd.to_string_lossy().into_owned(),
     };
-    let (job, unit, launch) = match daemon.ask(&submit)? {
-        DaemonMessage::Start { job, unit, launch } => (job, unit, launch),
-        other => return Err(Error::new(format!("unexpected reply {other:?}"))),
+    let mut reply = daemon.ask(&submit)?;
+    let (job, unit, launch) = loop {
+        match reply {
+            DaemonMessage::Start { job, unit, launch } => break (job, unit, launch),
+            DaemonMessage::Waiting { reason } => eprintln!("taskslash: waiting: {reason}"),
+            other => return Err(Error::new(format!("unexpected reply {other:?}"))),
+        }
+        reply = daemon.next()?;
     };
 
     let program = Path::new(&argv[0]);
@@ -104,13 +123,13 @@ pub fn run(socket: &Path, name: Option<String>, argv: &[OsString]) -> Result<i32
     Ok(code)
 }
 
-/// The recorded runs of `key`, newest first, at most 20.
-pub fn history(socket: &Path, key: &str) -> Result<Vec<Run>, Error> {
+/// The estimate of `key` and its recorded runs, newest first, at most 20.
+pub fn history(socket: &Path, key: &str) -> Result<(Estimate, Vec<Run>), Error> {
     let mut daemon = Connection::open(socket)?;
     match daemon.ask(&ClientMessage::History {
         key: key.to_owned(),
     })? {
-        DaemonMessage::Runs { runs } => Ok(runs),
+        DaemonMessage::Runs { estimate, runs } => Ok((estimate, runs)),
         other => Err(Error::new(format!("unexpected reply {other:?}"))),
     }
 }

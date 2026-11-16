@@ -9,7 +9,8 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 use taskslash_core::Error;
-use taskslash_core::protocol::{Run, Status};
+use taskslash_core::estimate::{Estimate, Source};
+use taskslash_core::protocol::{Kind, Run, Status};
 
 /// Admission control for builds and tests on this machine.
 #[derive(Parser)]
@@ -25,24 +26,32 @@ enum Commands {
     Daemon,
     /// Run a command as a job of the daemon.
     ///
+    /// Waits while the daemon will not start it yet: at most one job whose key has never finished
+    /// a run runs at a time, and a second one says `taskslash: waiting: <reason>` on stderr.
+    ///
     /// Exits with the command's exit code (128+N when signal N killed it, 127 when it cannot be
     /// started). Exits 1 when no daemon is running, which a command's own exit 1 can also mean.
     Run {
         /// A name for the job.
         #[arg(long)]
         name: Option<String>,
+        /// The job's cost class, whose defaults it gets until it has history: test, typecheck,
+        /// build, browser or command.
+        #[arg(long, default_value_t = Kind::Command)]
+        kind: Kind,
         /// The command and its arguments.
         #[arg(required = true, trailing_var_arg = true, value_name = "COMMAND")]
         command: Vec<OsString>,
     },
-    /// Show the recorded runs of a key, newest first (at most 20).
+    /// Show the cost estimate of a key and its recorded runs, newest first (at most 20).
     ///
-    /// A run's key is its `--name`, else the first two words of its command. A cost the daemon
+    /// Each figure of the estimate comes from the key's history, or from its kind's default when
+    /// no run feeds it (the kind is the newest run's). A run's key is its `--name`, else the first two words of its command. A cost the daemon
     /// could not measure (no systemd user session) shows as `-`, and as null with `--json`.
     History {
         /// The key: a `--name`, or the first two words of a command (`"bunx moon"`).
         key: String,
-        /// Print the runs as a JSON array.
+        /// Print `{"estimate": ..., "runs": [...]}`.
         #[arg(long)]
         json: bool,
     },
@@ -72,13 +81,17 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
     let socket = taskslash_core::socket_path()?;
     match command {
         Commands::Daemon => taskslash_core::serve(&socket, &taskslash_core::db_path()?).map(|()| 0),
-        Commands::Run { name, command } => taskslash_core::run(&socket, name, &command),
+        Commands::Run {
+            name,
+            kind,
+            command,
+        } => taskslash_core::run(&socket, name, kind, &command),
         Commands::History { key, json } => {
-            let runs = taskslash_core::history(&socket, &key)?;
+            let (estimate, runs) = taskslash_core::history(&socket, &key)?;
             let text = if json {
-                taskslash_core::protocol::runs_json(&runs)
+                taskslash_core::protocol::history_json(&estimate, &runs)
             } else {
-                table(&runs)
+                format!("{}{}", estimate_text(&estimate), table(&runs))
             };
             write!(io::stdout(), "{text}")
                 .map_err(|e| Error::new(format!("cannot write the runs: {e}")))?;
@@ -146,7 +159,38 @@ fn status_text(status: &Status) -> String {
             job.job, job.key, job.started_at
         ));
     }
+    for w in &status.waiting {
+        out.push_str(&format!(
+            "waiting {} {} ({}) for {:.0}s: {}\n",
+            w.job, w.key, w.kind, w.waited_s, w.reason
+        ));
+    }
     out
+}
+
+/// Two lines: each figure with where it came from, then how many runs fed it.
+fn estimate_text(e: &Estimate) -> String {
+    let from = |source: Source| match source {
+        Source::History => "history",
+        Source::Default => "default",
+    };
+    let peak = e
+        .cpu_peak_5s
+        .map_or(String::new(), |p| format!(", peak {p:.2} over 5s"));
+    let duration = e.duration_s.map_or("-".to_owned(), |d| format!("{d:.1}s"));
+    format!(
+        "estimate  cpu {:.2} threads{peak} ({}), memory {} MiB ({}), write {:.2} MiB/s ({}), \
+         duration {duration} ({})\nsamples   {} measured, {} calm\n",
+        e.cpu_threads,
+        from(e.source.cpu),
+        e.mem_mib,
+        from(e.source.mem),
+        e.write_mib_s,
+        from(e.source.io),
+        from(e.source.duration),
+        e.samples.measured,
+        e.samples.calm,
+    )
 }
 
 /// One header line and one line per run, `-` for a cost that was not measured.
@@ -176,6 +220,7 @@ fn table(runs: &[Run]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taskslash_core::estimate::estimate;
     use taskslash_core::protocol::Launch;
 
     #[test]
@@ -183,6 +228,7 @@ mod tests {
         let run = Run {
             id: 1,
             key: "t1".into(),
+            kind: Kind::Command,
             argv: vec!["sh".into(), "-c".into(), "exit 4".into()],
             cwd: "/work".into(),
             launch: Launch::Plain,
@@ -193,12 +239,26 @@ mod tests {
             peak_mem_bytes: None,
             written_bytes: None,
             exit_code: Some(4),
+            machine_cpu_some: None,
+            machine_mem_some: None,
+            machine_io_some: None,
         };
         let text = table(&[run]);
         let line: Vec<&str> = text.lines().nth(1).unwrap().split_whitespace().collect();
         assert_eq!(
             line,
             ["2026-11-16T02:17:44.464Z", "1.2s", "-", "-", "-", "-", "4"]
+        );
+    }
+
+    #[test]
+    fn an_estimate_with_no_history_says_default_for_each_figure() {
+        let text = estimate_text(&estimate(&[], Kind::Typecheck));
+        assert_eq!(
+            text,
+            "estimate  cpu 2.00 threads (default), memory 3072 MiB (default), \
+             write 0.00 MiB/s (default), duration - (default)\n\
+             samples   0 measured, 0 calm\n"
         );
     }
 }

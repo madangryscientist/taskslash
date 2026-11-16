@@ -106,6 +106,7 @@ fn status_json_has_every_field_in_range() {
 
     assert_eq!(status["type"], "status");
     assert_eq!(status["jobs"], serde_json::json!([]));
+    assert_eq!(status["waiting"], serde_json::json!([]));
     let m = &status["machine"];
     assert!(
         m["sampled_at"].as_str().is_some_and(|s| s.ends_with('Z')),

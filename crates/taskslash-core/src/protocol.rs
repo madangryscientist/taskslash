@@ -1,17 +1,89 @@
 //! The wire protocol: newline delimited JSON on a unix socket, one request per connection.
 //!
-//! A job: the client sends `submit`; the daemon answers `start` (or `error`, then closes). The
-//! client runs the command the way `start.launch` says, sends `exited`, and the daemon answers
+//! A job: the client sends `submit`; the daemon answers `start` (or `error`, then closes), first
+//! sending `waiting` once when the job has to queue. The client runs the command the way `start.launch` says, sends `exited`, and the daemon answers
 //! `recorded` once the run's row is written. An EOF before `exited` ends the job as dropped, and its
 //! row has no exit code.
 //!
-//! A query: the client sends `history`; the daemon answers `runs` and closes. Or it sends
-//! `status`; the daemon answers `status` (the machine's latest snapshot and the running jobs).
+//! A query: the client sends `history`; the daemon answers `runs` (the key's estimate and its runs)
+//! and closes. Or it sends `status`; the daemon answers `status` (the machine's latest snapshot, the
+//! running jobs and the waiting ones).
 
+use crate::estimate::Estimate;
 use crate::sampler::MachineSnapshot;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::io::{self, BufRead, Write};
+use std::str::FromStr;
+
+/// The cost class of a job (spike 4.4): which defaults it gets before it has history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Test,
+    Typecheck,
+    Build,
+    Browser,
+    #[default]
+    Command,
+}
+
+impl Kind {
+    pub const ALL: [Self; 5] = [
+        Self::Test,
+        Self::Typecheck,
+        Self::Build,
+        Self::Browser,
+        Self::Command,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Test => "test",
+            Self::Typecheck => "typecheck",
+            Self::Build => "build",
+            Self::Browser => "browser",
+            Self::Command => "command",
+        }
+    }
+
+    /// The CPU a job of this kind is assumed to take before it has history, in threads.
+    pub fn default_cpu_threads(self) -> f64 {
+        match self {
+            Self::Build | Self::Browser => 4.0,
+            Self::Test | Self::Typecheck | Self::Command => 2.0,
+        }
+    }
+
+    /// The memory a job of this kind is assumed to take before it has history, in MiB.
+    pub fn default_mem_mib(self) -> u64 {
+        match self {
+            Self::Test | Self::Command => 2048,
+            Self::Typecheck => 3072,
+            Self::Build | Self::Browser => 4096,
+        }
+    }
+}
+
+impl fmt::Display for Kind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Kind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == s)
+            .ok_or_else(|| {
+                format!("unknown kind {s:?}: one of test, typecheck, build, browser, command")
+            })
+    }
+}
 
 /// A message from the command line to the daemon.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +92,8 @@ pub enum ClientMessage {
     /// Ask to start a job. `argv` has at least one element.
     Submit {
         name: Option<String>,
+        #[serde(default)]
+        kind: Kind,
         argv: Vec<String>,
         cwd: String,
     },
@@ -60,10 +134,12 @@ pub enum DaemonMessage {
         unit: String,
         launch: Launch,
     },
+    /// The job is queued, for `reason`; `start` follows when it is admitted.
+    Waiting { reason: String },
     /// The job's end is recorded.
     Recorded { job: u64 },
-    /// The answer to `history`: at most 20 runs, newest first.
-    Runs { runs: Vec<Run> },
+    /// The answer to `history`: the key's estimate and at most 20 runs, newest first.
+    Runs { estimate: Estimate, runs: Vec<Run> },
     /// The answer to `status`.
     Status(Box<Status>),
     /// The request was refused; the daemon closes the connection after this.
@@ -75,6 +151,7 @@ pub enum DaemonMessage {
 pub struct Run {
     pub id: i64,
     pub key: String,
+    pub kind: Kind,
     pub argv: Vec<String>,
     pub cwd: String,
     pub launch: Launch,
@@ -88,6 +165,11 @@ pub struct Run {
     pub written_bytes: Option<i64>,
     /// `None` when the client went away before reporting how the command ended.
     pub exit_code: Option<i32>,
+    /// The mean of the machine's `some avg10` pressures over the run; `None` when no sample of the
+    /// machine fell inside it.
+    pub machine_cpu_some: Option<f64>,
+    pub machine_mem_some: Option<f64>,
+    pub machine_io_some: Option<f64>,
 }
 
 /// What the machine and the running jobs are doing, as `taskslash status --json` prints it.
@@ -96,6 +178,8 @@ pub struct Status {
     pub machine: MachineSnapshot,
     /// The running jobs, oldest first.
     pub jobs: Vec<JobStatus>,
+    /// The waiting jobs, in the order they will be considered.
+    pub waiting: Vec<WaitingStatus>,
 }
 
 /// A running job and the last live reading of it. The reading is `None` before its first one, and
@@ -104,10 +188,23 @@ pub struct Status {
 pub struct JobStatus {
     pub job: u64,
     pub key: String,
+    pub kind: Kind,
     /// RFC 3339, UTC.
     pub started_at: String,
     pub cpu_threads: Option<f64>,
     pub mem_mib: Option<u64>,
+    pub estimate: Estimate,
+}
+
+/// A queued job: how long it has waited, and why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitingStatus {
+    pub job: u64,
+    pub key: String,
+    pub kind: Kind,
+    pub waited_s: f64,
+    pub reason: String,
+    pub estimate: Estimate,
 }
 
 /// `status` as the one line of JSON `taskslash status --json` prints, with its newline.
@@ -118,9 +215,14 @@ pub fn status_json(status: Status) -> String {
     text
 }
 
-/// `runs` as a pretty JSON array and a newline, as `taskslash history --json` prints it.
-pub fn runs_json(runs: &[Run]) -> String {
-    let mut text = serde_json::to_string_pretty(runs).unwrap_or_else(|_| "[]".to_owned());
+/// `{"estimate":...,"runs":[...]}`, pretty, and a newline, as `taskslash history --json` prints it.
+pub fn history_json(estimate: &Estimate, runs: &[Run]) -> String {
+    #[derive(Serialize)]
+    struct History<'a> {
+        estimate: &'a Estimate,
+        runs: &'a [Run],
+    }
+    let mut text = serde_json::to_string_pretty(&History { estimate, runs }).unwrap_or_default();
     text.push('\n');
     text
 }
@@ -150,6 +252,7 @@ mod tests {
     fn messages_round_trip_as_tagged_json_lines() {
         let submit = ClientMessage::Submit {
             name: Some("probe".into()),
+            kind: Kind::Browser,
             argv: vec!["sh".into(), "-c".into(), "exit 3".into()],
             cwd: "/work".into(),
         };
@@ -167,7 +270,7 @@ mod tests {
         send(&mut wire, &history).unwrap();
         assert_eq!(
             String::from_utf8_lossy(&wire),
-            "{\"type\":\"submit\",\"name\":\"probe\",\"argv\":[\"sh\",\"-c\",\"exit 3\"],\"cwd\":\"/work\"}\n\
+            "{\"type\":\"submit\",\"name\":\"probe\",\"kind\":\"browser\",\"argv\":[\"sh\",\"-c\",\"exit 3\"],\"cwd\":\"/work\"}\n\
              {\"type\":\"start\",\"job\":3,\"unit\":\"taskslash-1-3\",\"launch\":\"scope\"}\n\
              {\"type\":\"history\",\"key\":\"probe\"}\n"
         );

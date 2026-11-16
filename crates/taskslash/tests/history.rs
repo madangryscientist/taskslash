@@ -42,13 +42,18 @@ impl Scratch {
         self.command(args).output().expect("the binary runs")
     }
 
-    /// The runs of `key`, from `history --json`.
-    fn history(&self, key: &str) -> Vec<Value> {
+    /// `history --json` of `key`: `{"estimate": ..., "runs": [...]}`.
+    fn history_json(&self, key: &str) -> Value {
         let out = self.run(&["history", key, "--json"]);
         assert_eq!(out.status.code(), Some(0), "{out:?}");
-        match serde_json::from_slice(&out.stdout).expect("history prints JSON") {
-            Value::Array(runs) => runs,
-            other => panic!("history printed {other}"),
+        serde_json::from_slice(&out.stdout).expect("history prints JSON")
+    }
+
+    /// The runs of `key`, from `history --json`.
+    fn history(&self, key: &str) -> Vec<Value> {
+        match self.history_json(key).get("runs") {
+            Some(Value::Array(runs)) => runs.clone(),
+            other => panic!("history printed no runs: {other:?}"),
         }
     }
 
@@ -142,6 +147,36 @@ fn a_run_is_recorded_with_its_exit_code_and_wall_time() {
     assert_eq!(runs[0]["exit_code"], 4, "{}", runs[0]);
     assert!(number(&runs[0], "wall_ms") > 0.0, "{}", runs[0]);
     assert_eq!(runs[0]["argv"], serde_json::json!(["sh", "-c", "exit 4"]));
+    assert_eq!(runs[0]["kind"], "command", "{}", runs[0]);
+}
+
+#[test]
+fn history_estimates_from_the_newest_kind_and_says_where_each_figure_came_from() {
+    let daemon = Scratch::new().daemon();
+    let out = daemon
+        .scratch
+        .run(&["run", "--name", "t4", "--kind", "build", "--", "sleep", "1"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let history = daemon.scratch.history_json("t4");
+    let estimate = &history["estimate"];
+    eprintln!("t4: {estimate}");
+    assert_eq!(history["runs"][0]["kind"], "build", "{history}");
+    if has_user_session() {
+        assert_eq!(estimate["samples"]["measured"], 1, "{estimate}");
+        // One measured run: memory and I/O from it; CPU and duration only when it was calm.
+        assert_eq!(estimate["source"]["mem"], "history", "{estimate}");
+        assert_eq!(estimate["source"]["io"], "history", "{estimate}");
+    } else {
+        assert_eq!(estimate["samples"]["measured"], 0, "{estimate}");
+        assert_eq!(estimate["cpu_threads"], 4.0, "{estimate}");
+        assert_eq!(estimate["mem_mib"], 4096, "{estimate}");
+        for figure in ["cpu", "mem", "io", "duration"] {
+            assert_eq!(estimate["source"][figure], "default", "{estimate}");
+        }
+    }
+    let empty = daemon.scratch.history_json("never");
+    assert_eq!(empty["estimate"]["mem_mib"], 2048, "{empty}");
+    assert_eq!(empty["runs"], serde_json::json!([]), "{empty}");
 }
 
 #[test]
@@ -221,8 +256,10 @@ fn plain_history_prints_a_header_and_a_line_per_run() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 3, "{text}");
-    let header: Vec<&str> = lines[0].split_whitespace().collect();
+    assert_eq!(lines.len(), 5, "{text}");
+    assert!(lines[0].starts_with("estimate  cpu "), "{text}");
+    assert!(lines[1].starts_with("samples   "), "{text}");
+    let header: Vec<&str> = lines[2].split_whitespace().collect();
     assert_eq!(
         header,
         [
@@ -236,6 +273,6 @@ fn plain_history_prints_a_header_and_a_line_per_run() {
         ]
     );
     // Newest first.
-    assert!(lines[1].ends_with(" 3"), "{text}");
-    assert!(lines[2].ends_with(" 0"), "{text}");
+    assert!(lines[3].ends_with(" 3"), "{text}");
+    assert!(lines[4].ends_with(" 0"), "{text}");
 }
