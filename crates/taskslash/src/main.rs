@@ -100,3 +100,33 @@ fn table(runs: &[Run]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use taskslash_core::protocol::Launch;
+
+    #[test]
+    fn a_plain_run_shows_a_dash_for_each_cost() {
+        let run = Run {
+            id: 1,
+            key: "t1".into(),
+            argv: vec!["sh".into(), "-c".into(), "exit 4".into()],
+            cwd: "/work".into(),
+            launch: Launch::Plain,
+            started_at: "2026-11-16T02:17:44.464Z".into(),
+            wall_ms: 1234,
+            cpu_usec: None,
+            peak_cpu_5s: None,
+            peak_mem_bytes: None,
+            written_bytes: None,
+            exit_code: Some(4),
+        };
+        let text = table(&[run]);
+        let line: Vec<&str> = text.lines().nth(1).unwrap().split_whitespace().collect();
+        assert_eq!(
+            line,
+            ["2026-11-16T02:17:44.464Z", "1.2s", "-", "-", "-", "-", "4"]
+        );
+    }
+}
