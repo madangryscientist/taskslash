@@ -1,7 +1,7 @@
 use std::process::{Command, Output};
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_slashproduct"))
+    Command::new(env!("CARGO_BIN_EXE_taskslash"))
         .args(args)
         .output()
         .expect("the binary runs")
@@ -11,7 +11,7 @@ fn run(args: &[&str]) -> Output {
 fn prints_its_version() {
     let out = run(&["--version"]);
     assert!(out.status.success());
-    let expected = format!("slashproduct {}\n", env!("CARGO_PKG_VERSION"));
+    let expected = format!("taskslash {}\n", env!("CARGO_PKG_VERSION"));
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
 }
 
@@ -21,7 +21,7 @@ fn greets_by_name() {
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "Hello, Ada, from SlashProduct.\n"
+        "Hello, Ada, from TaskSlash.\n"
     );
 }
 

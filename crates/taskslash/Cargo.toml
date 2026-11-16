@@ -1,6 +1,6 @@
 [package]
-name = "slashproduct"
-description = "The SlashProduct command line."
+name = "taskslash"
+description = "The TaskSlash command line."
 license = "MIT"
 publish = false
 version.workspace = true
@@ -8,4 +8,4 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-slashproduct-core = { path = "../slashproduct-core" }
+taskslash-core = { path = "../taskslash-core" }

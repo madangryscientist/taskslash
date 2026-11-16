@@ -1,11 +1,11 @@
-//! The `slashproduct` command line. Exit codes: 0 ok, 2 a usage error.
+//! The `taskslash` command line. Exit codes: 0 ok, 2 a usage error.
 
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
-  slashproduct greet <name>   greet someone
-  slashproduct --version      print the version
-  slashproduct --help         print this help
+  taskslash greet <name>   greet someone
+  taskslash --version      print the version
+  taskslash --help         print this help
 ";
 
 fn main() -> ExitCode {
@@ -13,7 +13,7 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["--version" | "-V"] => {
-            println!("slashproduct {}", env!("CARGO_PKG_VERSION"));
+            println!("taskslash {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         ["--help" | "-h"] => {
@@ -21,7 +21,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["greet", name] => {
-            println!("{}", slashproduct_core::greet(name));
+            println!("{}", taskslash_core::greet(name));
             ExitCode::SUCCESS
         }
         _ => {

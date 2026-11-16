@@ -1,6 +1,6 @@
 [package]
-name = "slashproduct-core"
-description = "The SlashProduct engine."
+name = "taskslash-core"
+description = "The TaskSlash engine."
 license = "MIT"
 publish = false
 version.workspace = true

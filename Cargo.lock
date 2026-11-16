@@ -3,12 +3,12 @@
 version = 4
 
 [[package]]
-name = "slashproduct"
+name = "taskslash"
 version = "0.1.0"
 dependencies = [
- "slashproduct-core",
+ "taskslash-core",
 ]
 
 [[package]]
-name = "slashproduct-core"
+name = "taskslash-core"
 version = "0.1.0"

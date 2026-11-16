@@ -1,4 +1,4 @@
-# Contributing to SlashProduct
+# Contributing to TaskSlash
 
 Thanks for helping. This page is the short version of [`AGENTS.md`](AGENTS.md), the full operating
 agreement for people and coding agents working here. Read it before a large change.
@@ -25,11 +25,8 @@ bun run test            # Vitest under Bun
 bun run build
 ```
 
-<!-- template:begin rust -->
 For the Rust crates, `lint` also runs clippy, `format:check` runs `cargo fmt --check` (`cargo fmt`
 fixes it) and `test` runs `cargo test`.
-
-<!-- template:end rust -->
 
 Lint rules are errors: fix the code, do not disable a rule.
 

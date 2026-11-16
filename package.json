@@ -1,5 +1,5 @@
 {
-  "name": "slashproduct-workspace",
+  "name": "taskslash-workspace",
   "private": true,
   "license": "MIT",
   "workspaces": [
@@ -8,14 +8,13 @@
   ],
   "type": "module",
   "scripts": {
-    "slashproduct": "bun packages/cli/src/index.ts",
+    "taskslash": "cargo run --quiet --package taskslash --",
     "typecheck": "moon run --concurrency 3 :typecheck",
     "lint": "moon run --concurrency 3 :lint && bun scripts/check-dashes.ts",
     "format": "oxfmt",
     "format:check": "oxfmt --check && moon run --concurrency 3 :format-check",
     "test": "moon run --concurrency 3 :test",
-    "build": "moon run --concurrency 3 :build",
-    "test:e2e": "moon run --concurrency 3 :test-e2e"
+    "build": "moon run --concurrency 3 :build"
   },
   "devDependencies": {
     "@moonrepo/cli": "2.6.5",

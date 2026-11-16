@@ -1,25 +1,8 @@
-# SlashProduct: repo conventions
+# TaskSlash: repo conventions
 
 This file is the operating agreement for contributors and agents working here: the gate, the landing
 rule and the invariants. Keep it accurate.
 
-<!-- template:begin self-test -->
-**This is the template.** `scripts/init.ts` turns a copy of it into a product (README.md says how).
-Every part is present here, so the gate below runs on all of them. Two rules for changing the template:
-
-- A file or line that belongs to one part sits inside `template:begin <part>` and
-  `template:end <part>` marker lines (`#`, `//` or `<!-- -->` comments), or under that part in
-  `PART_PATHS` (`scripts/template/product.ts`). The parts are `rust`, `ts` engine (`engine`), the npm
-  CLI (`cli`), `web`, the two licences (`mit`, `elastic`) and `self-test` (the template's own tests,
-  always removed). JSON has no comments, so init edits the root `package.json` scripts in code.
-- The placeholder name is `SlashProduct` (`slashproduct`, `SLASHPRODUCT`). Use it wherever the
-  product's name goes; init swaps all three spellings, in paths too.
-
-The `init` job in `ci.yml` creates a product for every choice (12 of them), checks it with
-`scripts/template/assert.ts` and runs its gate. `bunx moon run scripts:test` runs the same checks
-locally (`scripts/template/init.test.ts`).
-
-<!-- template:end self-test -->
 ## The gate
 
 A moon workspace (moon 2.6.5, pinned in the root `package.json`) on Bun workspaces.
@@ -31,19 +14,9 @@ toolchain, so moon never downloads Bun or runs `bun install`. Keep it that way (
 
 | Project | Path | What it is |
 | --- | --- | --- |
-<!-- template:begin engine -->
 | `engine` | `packages/engine` | the engine, a TypeScript library |
-<!-- template:end engine -->
-<!-- template:begin cli -->
-| `cli` | `packages/cli` | the `slashproduct` bin: argv, stdout and exit codes, over the engine |
-<!-- template:end cli -->
-<!-- template:begin rust -->
-| `core` | `crates/slashproduct-core` | the engine, a Rust library |
-| `bin` | `crates/slashproduct` | the `slashproduct` binary, over `slashproduct-core` |
-<!-- template:end rust -->
-<!-- template:begin web -->
-| `web` | `apps/web` | the web app: TanStack Start on Cloudflare Workers |
-<!-- template:end web -->
+| `core` | `crates/taskslash-core` | the engine, a Rust library |
+| `bin` | `crates/taskslash` | the `taskslash` binary, over `taskslash-core` |
 | `scripts` | `scripts` | the repo checks (typecheck and lint only) |
 
 The `gate` job in `.github/workflows/ci.yml` runs these on GitHub-hosted runners (`ubuntu-latest`),
@@ -59,21 +32,11 @@ bun run test                      # moon run :test
 bun run build                     # moon run :build
 ```
 
-<!-- template:begin rust -->
 For the crates, `lint` is `cargo clippy --all-targets -- -D warnings`, `test` is `cargo test` and
 `build` is `cargo build`, all `--locked`; `format:check` also runs `moon run :format-check`
 (`cargo fmt --check`, and `cargo fmt` fixes it). On a new machine run `rustup toolchain install`
 first: it installs the toolchain `rust-toolchain.toml` pins (the `gate` job does the same).
 
-<!-- template:end rust -->
-<!-- template:begin web -->
-The `apps` job runs when the apps or packages change: `bunx moon run web:test-e2e` (Playwright
-against a local production build), then `bunx moon run web:build --force` and the deploy dry run
-(`(cd apps/web && bunx wrangler deploy --dry-run --outdir "$TMPDIR/web-dry")`, no Cloudflare
-credentials needed). First time on a machine: `(cd apps/web && bunx playwright install
-chromium-headless-shell)`. `ui-review.yml` checks the UI is built the Hack Cove way.
-
-<!-- template:end web -->
 One project: `bunx moon run scripts:typecheck`. moon caches in `.moon/cache` (gitignored); add `--force` to
 rerun a cached task. A shared moon remote cache sits behind a bearer token read from
 `MOON_REMOTE_TOKEN`; unset, moon warns about a 401 and runs on the local cache, so CI passes with no
@@ -103,13 +66,8 @@ hardcoded `/tmp`.
 
 ## Invariants
 
-1. **Exit codes are a contract.** `slashproduct` exits 0 on success, 1 when the run failed for a
+1. **Exit codes are a contract.** `taskslash` exits 0 on success, 1 when the run failed for a
    reason that is not usage, 2 on a usage error.
 2. **The TypeScript code writes through `process.stdout` / `process.stderr`**, not `console` (the
    lint bans it outside `scripts/`).
 3. **A secret is read from the environment, never from the tree.**
-<!-- template:begin web -->
-4. **UI is composed from `@hackcove/ui-react`.** A custom style or component is a flag, not a fix; a
-   reusable gap is filed against the hackcove repo. Keep the Catppuccin credit comment in each
-   `styles.css`.
-<!-- template:end web -->
