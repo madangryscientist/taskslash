@@ -30,6 +30,7 @@ taskslash logs 7                          # what running job 7 has printed so fa
 taskslash logs 7 -f                       # the same, followed until it ends
 taskslash logs --last gate                # the newest run of "gate", running or not
 taskslash logs --failed                   # the newest run that failed
+taskslash plugins                         # the plugins on PATH (below)
 ```
 
 `taskslash run` runs the command itself, in your directory, with your environment and terminal, and
@@ -274,6 +275,57 @@ line): ...` for a job whose class waiting has raised).
 | `waiting[]` | each waiting job, in the order of the last pass: `job`, `key`, `kind`, `class`, `effective_class` (only when waiting has raised it), `submitter`, `waited_s`, `position` (1-based), `reason` (the sentence), `why` (the reason object) and its `estimate` |
 
 Shares and rates are 0 in the first second after the daemon starts, before there are two readings.
+
+### Plugins
+
+Anything else can plug into TaskSlash as a program of its own, in any language. A plugin is an
+executable named `taskslash-<name>` on `PATH`, found the way git and cargo find theirs (so a repo can
+ship one in its `node_modules/.bin`, and a Rust one installs to `~/.cargo/bin`).
+
+```bash
+taskslash plugins                         # every taskslash-<name> on PATH, and the path that runs
+taskslash plugins --json                  # [{"name", "path", "shadowed", "builtin"}, ...]
+taskslash hello world                     # runs taskslash-hello world
+```
+
+There are three kinds:
+
+| Kind | What it does | |
+| --- | --- | --- |
+| command | `taskslash <name> [args...]` runs `taskslash-<name> [args...]` | here now |
+| listener | follows the daemon's event stream (job queued, started, ended) | coming |
+| filter | rewrites a job's output on its way to the log and the terminal (secret redaction) | coming |
+
+A command plugin replaces the `taskslash` process, so its exit code and signals are its own. Built-in
+commands always win: a `taskslash-run` never runs. With no `taskslash-<name>` on `PATH`,
+`taskslash <name>` is a usage error (exit 2) that names the program it looked for. Only regular files
+(or links to one) with an execute bit count. When two directories on `PATH` hold the same name, the
+first one runs and `taskslash plugins` lists the later ones as shadowed.
+
+A plugin needs no daemon to start, and gets this contract in its environment:
+
+| Variable | What it holds |
+| --- | --- |
+| `TASKSLASH_PROTOCOL` | the version of the socket protocol, now `1`; it goes up on any breaking change |
+| `TASKSLASH_SOCKET` | the daemon's socket path, as `taskslash` resolves it; unset when it does not resolve (no `XDG_RUNTIME_DIR`) |
+| `TASKSLASH_BIN` | the absolute path of the running `taskslash`, to call back into it (`"$TASKSLASH_BIN" run -- ...`) |
+
+An example: save this as an executable `taskslash-hello` on `PATH`, then run `taskslash hello world`.
+
+<!-- plugin-example:start -->
+```sh
+#!/bin/sh
+# taskslash-hello: greets, then says whether the daemon answers.
+set -u
+echo "hello, ${1:-you}"
+echo "protocol $TASKSLASH_PROTOCOL"
+if [ -S "${TASKSLASH_SOCKET:-}" ] && "$TASKSLASH_BIN" status >/dev/null 2>&1; then
+  echo "the daemon is up"
+else
+  echo "no daemon"
+fi
+```
+<!-- plugin-example:end -->
 
 ### Install the daemon as a systemd user unit
 

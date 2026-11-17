@@ -89,6 +89,10 @@ impl FromStr for Kind {
     }
 }
 
+/// The version of the contract a plugin gets: `TASKSLASH_PROTOCOL` in its environment. Bumped on
+/// any breaking change to [`ClientMessage`] or [`DaemonMessage`].
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// A message from the command line to the daemon.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

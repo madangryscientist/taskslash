@@ -25,6 +25,7 @@ mod measure;
 mod moon;
 mod moon_run;
 pub mod order;
+pub mod plugin;
 pub mod procfs;
 pub mod protocol;
 pub mod sampler;
