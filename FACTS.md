@@ -8,13 +8,13 @@ TaskSlash stops builds and tests that start at the same time from overloading on
 ## Today
 - `daemon-queue`: A daemon, `taskslash daemon`, holds the queue and decides when each submitted job starts.
 - `run-command`: `taskslash run -- <command>` runs a command as a job, in your directory with your environment and terminal, and exits with the command's own exit code.
-- `admission-by-room`: A job starts only when its estimated CPU, memory and disk writes fit in what the machine has left, and jobs wait while the machine's CPU, memory or I/O pressure is over a set line.
+- `admission-by-room`: A job starts when its estimated CPU, memory and disk writes fit in what the machine has left, and waits while the machine's CPU, memory or I/O pressure is over a set line. A job too big to ever fit starts when nothing else runs, and a job held only by load TaskSlash does not run starts after a set wait.
 - `learned-estimates`: The daemon estimates what a job will cost from the recorded runs of the same name, and falls back to a default for its kind (test, typecheck, build, browser, command) until there is history.
 - `measured-runs`: With a systemd user session, each job runs in its own systemd scope and the daemon records its wall time, CPU, peak memory, disk writes and exit code in a SQLite database.
 - `priority-classes`: A job has a priority class (urgent, flake, interactive, normal, background), and within a class the worktree using the least of the machine goes first.
 - `waiting-reason`: A job that waits says why on stderr, and `taskslash why <job>` prints the same reason, also as JSON.
 - `moon-targets`: `taskslash moon <targets>` runs moon targets as one job per target, each once, after its dependencies passed.
-- `job-logs`: Every job's output is kept in a log file of its own, and `taskslash logs` prints it, by job, run, name or the last failure.
+- `job-logs`: Every job's output is kept in a log file of its own until it passes a set age or the logs pass a set size, and `taskslash logs` prints it, by job, run, name or the last failure.
 - `history`: `taskslash history <name>` prints a job's estimate and what its last runs cost.
 - `status`: `taskslash status` shows the machine's load, pressure, memory, disks and the running and waiting jobs, also as JSON.
 - `events`: `taskslash events` prints one JSON line per job queued, started and finished, for other tools to follow.
@@ -25,7 +25,7 @@ TaskSlash stops builds and tests that start at the same time from overloading on
 ## Planned
 - `filter-plugins`: Filter plugins that rewrite a job's output on its way to the log and the terminal, such as secret redaction.
 - `machine-pool`: Scheduling across a pool of machines.
-- `ci-runners`: Scheduling for CI runners.
+- `ci-runners`: Scheduling for CI.
 
 ## Licence
 - `licence`: open source under the MIT licence
