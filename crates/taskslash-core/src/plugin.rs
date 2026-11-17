@@ -35,15 +35,22 @@ fn executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-/// The directories of a `PATH` value, in order, without empty entries or repeats.
+/// The directories of a `PATH` value, in order, without empty entries or repeats. A repeat is the
+/// same directory by its resolved path, so `/bin` after `/usr/bin` on a merged-/usr system is one.
 fn dirs(path: &OsStr) -> Vec<PathBuf> {
     let mut seen = Vec::new();
+    let mut dirs = Vec::new();
     for dir in std::env::split_paths(path) {
-        if !dir.as_os_str().is_empty() && !seen.contains(&dir) {
-            seen.push(dir);
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let real = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !seen.contains(&real) {
+            seen.push(real);
+            dirs.push(dir);
         }
     }
-    seen
+    dirs
 }
 
 /// The program `taskslash <name>` runs: the first `taskslash-<name>` on `path` that is an
@@ -60,7 +67,8 @@ pub fn find(name: &OsStr, path: &OsStr) -> Option<PathBuf> {
         .find(|candidate| executable(candidate))
 }
 
-/// Every plugin on `path`, by name; `builtins` are the names a plugin can never take.
+/// Every plugin on `path`, by name; `builtins` are the names a plugin can never take. A file name
+/// that is not UTF-8 is left out (`find` still runs it).
 pub fn list(path: &OsStr, builtins: &[String]) -> Vec<Plugin> {
     let mut found: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for dir in dirs(path) {
@@ -93,6 +101,36 @@ pub fn list(path: &OsStr, builtins: &[String]) -> Vec<Plugin> {
             }
         })
         .collect()
+}
+
+/// The candidate closest to `name` by edit distance, when it is within a third of the name's
+/// length (at least 1): what a typo of a built-in most likely meant.
+pub fn closest<'a>(name: &str, candidates: &'a [String]) -> Option<&'a str> {
+    let limit = (name.chars().count() / 3).max(1);
+    candidates
+        .iter()
+        .map(|c| (distance(name, c), c.as_str()))
+        .filter(|(d, _)| *d <= limit)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+/// The Levenshtein distance between `a` and `b`, by characters.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let next = (diagonal + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(row[j + 1] + 1);
+            diagonal = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
 }
 
 /// One line per plugin: `<name>  <path>`, then what shadows or blocks it.
@@ -221,50 +259,20 @@ mod tests {
     }
 
     #[test]
-    fn list_groups_by_name_marks_shadows_and_builtins() {
-        let tmp = Dir::new("list");
-        let (a, b) = (tmp.sub("a"), tmp.sub("b"));
-        write(&a.join("taskslash-x"), 0o755);
-        write(&b.join("taskslash-x"), 0o755);
-        write(&b.join("taskslash-run"), 0o700);
-        write(&b.join("taskslash-off"), 0o644);
-        write(&b.join("taskslash-"), 0o755);
-        write(&b.join("other"), 0o755);
-        let path = join(&[&a, &b, &a, &tmp.0.join("missing")]);
-        let plugins = list(&path, &["run".to_owned()]);
-        assert_eq!(
-            plugins,
-            vec![
-                Plugin {
-                    name: "run".into(),
-                    path: b.join("taskslash-run"),
-                    shadowed: vec![],
-                    builtin: true,
-                },
-                Plugin {
-                    name: "x".into(),
-                    path: a.join("taskslash-x"),
-                    shadowed: vec![b.join("taskslash-x")],
-                    builtin: false,
-                },
-            ]
-        );
-        let text = list_text(&plugins);
-        assert_eq!(
-            text,
-            format!(
-                "run  {}  (a built-in has this name: never run)\nx    {}  (shadows {})\n",
-                b.join("taskslash-run").display(),
-                a.join("taskslash-x").display(),
-                b.join("taskslash-x").display()
-            )
-        );
-        let json: serde_json::Value = serde_json::from_str(&list_json(&plugins)).unwrap();
-        assert_eq!(json[1]["name"], "x");
-        assert_eq!(
-            json[1]["shadowed"][0],
-            b.join("taskslash-x").to_str().unwrap()
-        );
-        assert_eq!(json[0]["builtin"], true);
+    fn a_directory_reached_twice_is_read_once() {
+        let tmp = Dir::new("dirs");
+        let real = tmp.sub("real");
+        symlink(&real, tmp.0.join("alias")).unwrap();
+        let path = join(&[&real, Path::new(""), &tmp.0.join("alias"), &real]);
+        assert_eq!(dirs(&path), vec![real]);
+    }
+
+    #[test]
+    fn closest_names_a_near_builtin_and_nothing_far() {
+        let builtins: Vec<String> = ["status", "run", "logs"].map(String::from).into();
+        assert_eq!(closest("stauts", &builtins), Some("status"));
+        assert_eq!(closest("rum", &builtins), Some("run"));
+        assert_eq!(closest("bench", &builtins), None);
+        assert_eq!(distance("kitten", "sitting"), 3);
     }
 }

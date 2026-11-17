@@ -207,19 +207,21 @@ fn plugin(argv: Vec<OsString>) -> Error {
     let name = argv.next().unwrap_or_default();
     let args: Vec<OsString> = argv.collect();
     let path = std::env::var_os("PATH").unwrap_or_default();
-    match plugin::find(&name, &path) {
-        Some(program) => plugin::exec(&program, &args),
-        None => Cli::command()
-            .error(
-                ErrorKind::InvalidSubcommand,
-                format!(
-                    "unrecognized subcommand '{0}'\n\nNo program named {1}{0} is on PATH.",
-                    name.to_string_lossy(),
-                    plugin::PREFIX
-                ),
-            )
-            .exit(),
+    if let Some(program) = plugin::find(&name, &path) {
+        return plugin::exec(&program, &args);
     }
+    let name = name.to_string_lossy();
+    let builtins = builtins();
+    let tip = plugin::closest(&name, &builtins)
+        .map(|c| format!("\n\n  tip: a similar subcommand exists: '{c}'"))
+        .unwrap_or_default();
+    let message = format!(
+        "unrecognized subcommand '{name}'{tip}\n\nNo program named {}{name} is on PATH.",
+        plugin::PREFIX
+    );
+    Cli::command()
+        .error(ErrorKind::InvalidSubcommand, message)
+        .exit()
 }
 
 fn dispatch(command: Commands) -> Result<i32, Error> {

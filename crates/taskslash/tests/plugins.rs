@@ -153,6 +153,17 @@ fn an_unknown_name_is_a_usage_error_naming_the_program() {
     let err = text(&out.stderr);
     assert!(err.contains("unrecognized subcommand 'nope'"), "{err}");
     assert!(err.contains("taskslash-nope"), "{err}");
+    assert!(!err.contains("tip:"), "{err}");
+
+    // A typo of a built-in still gets the tip.
+    let out = taskslash(&[&bin], &["stauts"], &[]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("a similar subcommand exists: 'status'"),
+        "{err}"
+    );
+    assert!(err.contains("taskslash-stauts"), "{err}");
 }
 
 #[test]
@@ -166,7 +177,12 @@ fn plugins_lists_shadows_and_marks_builtins() {
     fs::create_dir(b.join("taskslash-dir")).unwrap();
     script(&b.join("unrelated"), "exit 0", 0o755);
 
-    let out = taskslash(&[&a, &b], &["plugins"], &[]).output().unwrap();
+    script(&b.join("taskslash-"), "exit 0", 0o755);
+    // A repeated directory and one that is not there change nothing.
+    let missing = tmp.0.join("missing");
+    let path: &[&Path] = &[&a, &b, &a, &missing];
+
+    let out = taskslash(path, &["plugins"], &[]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert_eq!(
         text(&out.stdout),
@@ -178,7 +194,7 @@ fn plugins_lists_shadows_and_marks_builtins() {
         )
     );
 
-    let out = taskslash(&[&a, &b], &["plugins", "--json"], &[])
+    let out = taskslash(path, &["plugins", "--json"], &[])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{out:?}");
