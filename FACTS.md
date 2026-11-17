@@ -18,8 +18,8 @@ TaskSlash stops builds and tests that start at the same time from overloading on
 - `history`: `taskslash history <name>` prints a job's estimate and what its last runs cost.
 - `status`: `taskslash status` shows the machine's load, pressure, memory, disks and the running and waiting jobs, also as JSON.
 - `events`: `taskslash events` prints one JSON line per job queued, started and finished, for other tools to follow.
-- `command-plugins`: Any program named `taskslash-<name>` on `PATH` runs as `taskslash <name>`, and `taskslash plugins` lists them.
-- `desktop-proof`: On one desktop, three gates and two browser runs started together stayed under the pressure lines through TaskSlash and finished sooner than without it (docs/proof/phase-1.md).
+- `command-plugins`: A program named `taskslash-<name>` on `PATH` runs as `taskslash <name>` unless `<name>` is a built-in command, and `taskslash plugins` lists them.
+- `desktop-proof`: On one desktop, three gates and two browser runs started together stayed under the pressure lines through TaskSlash, and the whole load finished sooner than without it, though each browser run took longer (docs/proof/phase-1.md).
 - `no-release`: There is no release you can install yet: you build it from source with cargo.
 
 ## Planned
