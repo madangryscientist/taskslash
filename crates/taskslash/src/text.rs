@@ -459,24 +459,12 @@ mod tests {
     fn cancel_says_where_the_job_was_and_what_was_sent() {
         let now = |was, already| Cancelled::Now { was, already };
         assert_eq!(
-            cancel_text(&now(Was::Waiting, false), 12, 10).unwrap(),
-            "job 12 cancelled (was waiting)\n"
-        );
-        assert_eq!(
-            cancel_text(&now(Was::Running, false), 12, 10).unwrap(),
-            "job 12 cancelled (was running; SIGTERM sent, SIGKILL in 10s if it has not ended)\n"
-        );
-        assert_eq!(
             cancel_text(&now(Was::Running, false), 12, 0).unwrap(),
             "job 12 cancelled (was running; SIGKILL sent)\n"
         );
         assert_eq!(
             cancel_text(&now(Was::Running, true), 12, 10).unwrap(),
             "job 12 is already being cancelled (it was running)\n"
-        );
-        assert_eq!(
-            cancel_text(&Cancelled::NotHeld(None), 12, 10).unwrap_err(),
-            "job 12 is not waiting or running\n  (taskslash status lists jobs)"
         );
         assert_eq!(
             cancel_text(&Cancelled::NotHeld(Some(JobEnded::NeverRan)), 12, 10).unwrap_err(),

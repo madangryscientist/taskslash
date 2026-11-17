@@ -272,7 +272,8 @@ pub(crate) struct Stop {
 
 #[derive(Default)]
 struct StopState {
-    /// The process to signal, and whether it leads a process group of its own (signal the group).
+    /// The process to signal, and whether it leads a process group of its own (signal the group,
+    /// else the process and its descendants).
     target: Option<(libc::pid_t, bool)>,
     /// A stop asked for before the command started: its grace period.
     pending: Option<Duration>,
@@ -284,12 +285,44 @@ impl StopState {
         if self.ended {
             return;
         }
-        if let Some((pid, group)) = self.target {
-            // SAFETY: kill signals that process, or with a negative pid its group; a gone one is
-            // ESRCH.
-            unsafe { libc::kill(if group { -pid } else { pid }, signal) };
+        match self.target {
+            // SAFETY: a negative pid signals that process group; a gone one is ESRCH.
+            Some((pid, true)) => unsafe {
+                libc::kill(-pid, signal);
+            },
+            // Not a group of its own (it shares the client's): the process and everything under
+            // it, gathered before any is signalled, so none is reparented out of reach first.
+            Some((pid, false)) => {
+                for pid in tree(pid) {
+                    // SAFETY: signals one process; a gone one is ESRCH.
+                    unsafe { libc::kill(pid, signal) };
+                }
+            }
+            None => {}
         }
     }
+}
+
+/// `pid` and its descendants, from each thread's `/proc/<pid>/task/<tid>/children`.
+fn tree(pid: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut found = vec![pid];
+    let mut next = 0;
+    while let Some(&parent) = found.get(next) {
+        next += 1;
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{parent}/task")) else {
+            continue;
+        };
+        for task in tasks.flatten() {
+            let children =
+                std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            found.extend(
+                children
+                    .split_whitespace()
+                    .filter_map(|c| c.parse::<libc::pid_t>().ok()),
+            );
+        }
+    }
+    found
 }
 
 impl Stop {
@@ -621,4 +654,52 @@ fn open_pty() -> io::Result<(OwnedFd, OwnedFd)> {
         )?;
     }
     Ok((master, slave))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Stop;
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// Whether `pid` is gone, or a zombie nobody has reaped yet.
+    fn gone(pid: &str) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+            stat.rsplit(") ").next().is_some_and(|s| s.starts_with('Z'))
+        })
+    }
+
+    #[test]
+    fn a_stop_without_a_group_kills_the_process_and_what_it_started() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 600 & echo $!; wait"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let grandchild = line.trim().to_owned();
+        let stop = Arc::new(Stop::default());
+        stop.started(libc::pid_t::try_from(child.id()).unwrap(), false);
+        stop.stop(Duration::ZERO);
+        let status = child.wait().unwrap();
+        stop.ended();
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(9)
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gone(&grandchild) {
+            assert!(
+                Instant::now() < deadline,
+                "sleep {grandchild} outlived the stop"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
