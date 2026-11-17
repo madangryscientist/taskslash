@@ -251,6 +251,9 @@ fn a_job_that_leaves_the_queue_still_gets_its_finished() {
     events.wait().unwrap();
 }
 
+/// The wiring: a subscriber that never reads is connected while a job runs. A few events fit in
+/// the socket's buffer, so this does not fill its queue; the `Bus` unit tests in the daemon prove
+/// that a full queue never makes `publish` wait.
 #[test]
 fn a_subscriber_that_never_reads_does_not_hold_up_a_job() {
     let daemon = Daemon::start();

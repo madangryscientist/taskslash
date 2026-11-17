@@ -264,7 +264,7 @@ pub fn why(socket: &Path, job: u64) -> Result<Option<(Reason, u64, usize)>, Erro
     }
 }
 
-/// Subscribes to the daemon's job events and writes each `event` line to `out` as it arrives,
+/// Subscribes to the daemon's job events and writes each event line to `out` as it arrives,
 /// unchanged, until the daemon hangs up. `subscribed` is not written.
 pub fn events(socket: &Path, out: &mut impl Write) -> Result<(), Error> {
     let mut daemon = Connection::open(socket)?;
@@ -283,13 +283,11 @@ pub fn events(socket: &Path, out: &mut impl Write) -> Result<(), Error> {
         {
             return Ok(());
         }
-        let message: DaemonMessage =
-            serde_json::from_str(&line).map_err(|e| daemon.lost(e.into()))?;
-        if let DaemonMessage::Event { .. } = message {
-            out.write_all(line.as_bytes())
-                .and_then(|()| out.flush())
-                .map_err(|e| Error::new(format!("cannot write the events: {e}")))?;
-        }
+        // After `subscribed` the daemon sends only event lines, copied as they are so an event
+        // type this client does not know yet still gets through.
+        out.write_all(line.as_bytes())
+            .and_then(|()| out.flush())
+            .map_err(|e| Error::new(format!("cannot write the events: {e}")))?;
     }
 }
 
