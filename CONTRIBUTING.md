@@ -39,3 +39,7 @@ Lint rules are errors: fix the code, do not disable a rule.
   at the end: `fix(engine): handle an empty list (#12)`. The squash keeps your subject.
 - Stage files by name. Never commit straight to `main`.
 - No AI attribution trailers are required or expected.
+
+## FACTS.md
+
+A pull request that changes what TaskSlash does, where it runs or its licence updates [`FACTS.md`](FACTS.md) in the same pull request, and moves its "Checked against" line to the commit and date it was checked.
