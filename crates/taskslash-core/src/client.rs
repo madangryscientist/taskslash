@@ -3,7 +3,7 @@
 //! reports how it ended, and returns its exit code (`taskslash moon`
 //! does the same for many jobs at once, one thread and one connection each);
 //! `taskslash history` asks for a key's recorded runs, `taskslash status` for what is running, and
-//! `taskslash why` why a job waits, and `taskslash events` follows the job events.
+//! `taskslash why` why a job waits, and `taskslash events` and `taskslash top` follow the job events.
 
 use crate::Error;
 use crate::admission::{Reason, waiting_line};
@@ -11,7 +11,8 @@ use crate::capture;
 use crate::estimate::Estimate;
 use crate::launch;
 use crate::protocol::{
-    Class, ClientMessage, DaemonMessage, JobState, Kind, Launch, Run, Status, receive, send,
+    Class, ClientMessage, DaemonMessage, JobEvent, JobState, Kind, Launch, Run, Status, receive,
+    send,
 };
 use std::env;
 use std::ffi::OsString;
@@ -19,7 +20,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 /// The exit code when the command cannot be started, as a shell uses.
@@ -291,6 +292,48 @@ pub fn events(socket: &Path, out: &mut impl Write) -> Result<(), Error> {
     }
 }
 
+/// Subscribes to the daemon's job events. Returns once the daemon has answered `subscribed`, so
+/// every event from then on reaches [`Subscription::each`].
+pub fn subscribe(socket: &Path) -> Result<Subscription, Error> {
+    let mut daemon = Connection::open(socket)?;
+    match daemon.ask(&ClientMessage::Subscribe)? {
+        DaemonMessage::Subscribed { .. } => Ok(Subscription {
+            reader: daemon.reader,
+            socket: socket.to_owned(),
+        }),
+        other => Err(Error::new(format!("unexpected reply {other:?}"))),
+    }
+}
+
+/// A subscription to the daemon's job events, from [`subscribe`].
+pub struct Subscription {
+    reader: BufReader<UnixStream>,
+    socket: PathBuf,
+}
+
+impl Subscription {
+    /// Hands each event, parsed, to `on_event`, until the daemon hangs up or `on_event` returns
+    /// false (both `Ok`). A line that is not an event this client knows (a newer event type) is
+    /// skipped.
+    pub fn each(mut self, mut on_event: impl FnMut(JobEvent) -> bool) -> Result<(), Error> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = self.reader.read_line(&mut line).map_err(|e| {
+                Error::new(format!("lost the daemon at {}: {e}", self.socket.display()))
+            })?;
+            if read == 0 {
+                return Ok(());
+            }
+            if let Ok(DaemonMessage::Event { event, .. }) = serde_json::from_str(&line)
+                && !on_event(event)
+            {
+                return Ok(());
+            }
+        }
+    }
+}
+
 /// Who submits from `cwd`: the nearest ancestor of it, itself first, with a `.git` entry (a
 /// directory in a clone, a file in a worktree), else `cwd`.
 fn submitter(cwd: &Path) -> &Path {
@@ -309,8 +352,11 @@ fn exit_code(status: ExitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::submitter;
+    use super::{submitter, subscribe};
+    use crate::protocol::JobEvent;
     use std::fs;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
     use std::path::Path;
 
     #[test]
@@ -335,5 +381,45 @@ mod tests {
         );
         fs::remove_dir_all(&root).unwrap();
         assert_eq!(submitter(Path::new("/")), Path::new("/"));
+    }
+
+    #[test]
+    fn subscribe_hands_over_each_event_parsed_and_skips_an_unknown_line() {
+        let dir = std::env::temp_dir().join(format!("tksub-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("d.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let daemon = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line, "{\"type\":\"subscribe\"}\n");
+            let mut out = stream;
+            out.write_all(
+                b"{\"type\":\"subscribed\",\"protocol\":1}\n\
+                  {\"type\":\"event\",\"protocol\":1,\"seq\":1,\"event\":{\"type\":\"dropped\",\"count\":3}}\n\
+                  {\"type\":\"event\",\"protocol\":1,\"seq\":2,\"event\":{\"type\":\"later\",\"job\":1}}\n\
+                  {\"type\":\"event\",\"protocol\":1,\"seq\":3,\"event\":{\"type\":\"dropped\",\"count\":4}}\n",
+            )
+            .unwrap();
+        });
+        let mut got = Vec::new();
+        subscribe(&socket)
+            .unwrap()
+            .each(|event| {
+                got.push(event);
+                true
+            })
+            .unwrap();
+        daemon.join().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            got,
+            [
+                JobEvent::Dropped { count: 3 },
+                JobEvent::Dropped { count: 4 }
+            ]
+        );
     }
 }

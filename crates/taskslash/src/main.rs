@@ -2,7 +2,8 @@
 //!
 //! Exit codes: 0 ok, 1 a failure that is not usage, 2 a usage error. `taskslash run` exits with
 //! its command's code instead. `taskslash history`, `taskslash status` and `taskslash events` exit 1
-//! when no daemon is running, as `run` does; `events` exits 0 when the daemon hangs up.
+//! when no daemon is running, as `run` does; `events` exits 0 when the daemon hangs up. `taskslash
+//! top` exits 1 when no daemon is running and 2 when stdout is not a terminal.
 //! `taskslash moon` exits 1 when any target did not pass. `taskslash logs` exits 1 when the log it
 //! names is not there. `taskslash <name>`, for a name that is not a
 //! built-in, runs the plugin `taskslash-<name>` from `PATH` in place of taskslash, so the exit code
@@ -20,6 +21,7 @@ use taskslash_core::protocol::{Class, Kind, LogSelect};
 use text::{estimate_text, status_text, table};
 
 mod text;
+mod top;
 
 /// Admission control for builds and tests on this machine.
 #[derive(Parser)]
@@ -177,6 +179,15 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Show the machine, the jobs and the selected job's output on one screen, live.
+    ///
+    /// A strip of the machine's CPU, memory, pressure and load on top; the running jobs, the
+    /// waiting ones in queue order and the jobs that finished since top opened (newest first) on
+    /// the left; the selected job's log, its last lines, on the right, followed as it grows (a
+    /// waiting job shows why it waits). Up/down or j/k select; q, Esc or Ctrl-C quit.
+    ///
+    /// Exits 1 when no daemon is running, 2 when stdout is not a terminal.
+    Top,
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -265,6 +276,7 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
                 .map_err(|e| Error::new(format!("cannot write the plugins: {e}")))?;
             Ok(0)
         }
+        Commands::Top => top::run(&socket()?),
         Commands::Events => {
             taskslash_core::events(&socket()?, &mut io::stdout().lock()).map(|()| 0)
         }
