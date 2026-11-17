@@ -330,7 +330,7 @@ fn history_with_no_key_lists_the_keys_newest_first() {
         ["last_run", "runs", "exit", "where", "key"],
         "{text}"
     );
-    let dir = daemon.scratch.dir.file_name().unwrap().to_string_lossy();
+    let dir = shown(&daemon.scratch);
     let rows: Vec<(&str, &str, &str, &str)> = lines[1..]
         .iter()
         .map(|l| (l[1], l[2], l[3], l[4]))
@@ -421,13 +421,7 @@ fn limit_and_where_filter_the_runs() {
     let there = runs(&["--where", "other"]);
     assert_eq!(there.len(), 1, "{there:?}");
     assert_eq!(there[0]["submitter"], other.to_string_lossy().as_ref());
-    let full = runs(&[
-        "--where",
-        &daemon.scratch.dir.to_string_lossy(),
-        "--limit",
-        "2",
-    ]);
-    assert_eq!(full.len(), 2, "{full:?}");
+    assert_eq!(runs(&["--where", "other/"]).len(), 1, "a trailing slash");
 
     let out = daemon.scratch.run(&["history", "k", "--where", "nowhere"]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
