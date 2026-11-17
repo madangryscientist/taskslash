@@ -10,6 +10,8 @@ daemon samples the whole machine once a second. From those records it estimates 
 cost, and a job starts only when its estimate fits in the room the machine has left. A job that
 waits says what it waits for.
 
+The proof that it works on a real desktop under load: [`docs/proof/phase-1.md`](docs/proof/phase-1.md).
+
 ## Use
 
 ```bash
@@ -390,7 +392,7 @@ The same command also upgrades: rerun it after pulling a new `main`, and a job r
 | `packages/engine` | the engine, a TypeScript library |
 | `crates/taskslash-core` | the engine, a Rust library |
 | `crates/taskslash` | the `taskslash` command (the Rust binary) |
-| `scripts` | the repo checks |
+| `scripts` | the repo checks, and `record-machine.ts`, which records a proof run |
 
 ## Develop
 
