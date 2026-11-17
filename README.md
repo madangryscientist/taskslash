@@ -57,7 +57,7 @@ target's own log.
 
 A log holds stdout and stderr together, in the order the client read them, with nothing added. It
 is a file per job in `logs` beside the database (`~/.local/state/taskslash/logs/` by default, so
-`TASKSLASH_DB` moves it too), or in `$TASKSLASH_LOGS`. The directory is mode 0700 and each log 0600.
+`TASKSLASH_DB` moves it too), or in `$TASKSLASH_LOGS`. The daemon creates the directory with mode 0700 when it is missing (one that is already there keeps its mode), and each log is 0600.
 A log is named after the job's systemd unit, `taskslash-<daemon pid>-<job>.log`: job numbers start
 again at 1 when the daemon restarts, and the pid keeps the names apart. `taskslash status --json`
 shows each running job's `log_path`, and `taskslash history --json` each run's (null for a run

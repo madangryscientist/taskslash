@@ -47,30 +47,22 @@ pub(crate) fn open_log(path: &Path) -> Option<File> {
     }
 }
 
-/// One file descriptor the copy loop reads.
-pub(crate) struct Source {
-    pub fd: OwnedFd,
-    /// Output, copied into the log too; forwarded input is not.
-    pub output: bool,
-}
-
-/// Copies from `sources` until every output is at its end, or `done` is set and nothing arrived
-/// for `DRAIN` (a process the command left behind may hold an output open). Each chunk of output
-/// goes into `log`, then every chunk to `deliver(index, chunk)`, which returns false when its
-/// destination is gone: that source is then closed, so a command writing to it gets SIGPIPE (or
-/// SIGHUP on a terminal) as it would have with no client in between.
+/// Copies the command's outputs `sources` until each is at its end, or `done` is set and nothing
+/// arrived for `DRAIN` (a process the command left behind may hold an output open). Each chunk goes
+/// into `log`, then to `deliver(index, chunk)`, which returns false when its destination is gone:
+/// that source is then closed, so a command writing to it gets SIGPIPE (or SIGHUP on a terminal) as
+/// it would have with no client in between.
 pub(crate) fn pump(
-    sources: Vec<Source>,
+    sources: Vec<OwnedFd>,
     mut log: Option<&mut File>,
     done: &AtomicBool,
     mut deliver: impl FnMut(usize, &[u8]) -> bool,
 ) {
-    let mut open: Vec<Option<Source>> = sources.into_iter().map(Some).collect();
+    let mut open: Vec<Option<OwnedFd>> = sources.into_iter().map(Some).collect();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let finished = done.load(Ordering::Acquire);
-        let outputs = open.iter().flatten().any(|s| s.output);
-        if finished && !outputs {
+        if finished && open.iter().all(Option::is_none) {
             break;
         }
         let mut fds: Vec<libc::pollfd> = Vec::new();
@@ -78,7 +70,7 @@ pub(crate) fn pump(
         for (i, source) in open.iter().enumerate() {
             if let Some(source) = source {
                 fds.push(libc::pollfd {
-                    fd: source.fd.as_raw_fd(),
+                    fd: source.as_raw_fd(),
                     events: libc::POLLIN,
                     revents: 0,
                 });
@@ -104,15 +96,13 @@ pub(crate) fn pump(
             if fd.revents == 0 {
                 continue;
             }
-            let Some(source) = &open[i] else { continue };
             // SAFETY: `buf` is valid for `buf.len()` bytes and `fd` is open.
             let got = unsafe { libc::read(fd.fd, buf.as_mut_ptr().cast(), buf.len()) };
             let keep = match usize::try_from(got) {
                 Ok(0) => false,
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    if source.output
-                        && let Some(file) = log.as_mut()
+                    if let Some(file) = log.as_mut()
                         && let Err(e) = file.write_all(chunk)
                     {
                         // A full disk loses the rest of the log, never the caller's copy or the
@@ -135,9 +125,8 @@ pub(crate) fn pump(
     }
 }
 
-/// Writes all of `bytes` to `fd`, unbuffered. When `fd` is non-blocking and full, waits for room,
-/// unless `drop_when_full`, which returns `WouldBlock` with the rest unwritten.
-fn write_fd(fd: RawFd, mut bytes: &[u8], drop_when_full: bool) -> io::Result<()> {
+/// Writes all of `bytes` to `fd`, unbuffered, waiting for room when `fd` is non-blocking and full.
+fn write_fd(fd: RawFd, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
         // SAFETY: `bytes` is valid for `bytes.len()` bytes.
         let wrote = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
@@ -147,7 +136,7 @@ fn write_fd(fd: RawFd, mut bytes: &[u8], drop_when_full: bool) -> io::Result<()>
                 let e = io::Error::last_os_error();
                 match e.kind() {
                     io::ErrorKind::Interrupted => {}
-                    io::ErrorKind::WouldBlock if !drop_when_full => {
+                    io::ErrorKind::WouldBlock => {
                         let mut room = libc::pollfd {
                             fd,
                             events: libc::POLLOUT,
@@ -400,14 +389,6 @@ pub(crate) fn run(mut command: Command, mut log: Option<File>) -> io::Result<Exi
     }
     // The stdin copy writes to a master of its own, which outlives the copy loop's.
     let to_master = master.as_ref().map(OwnedFd::try_clone).transpose()?;
-    if let Some(master) = &master {
-        // SAFETY: sets a flag on an fd we own (shared with its copies). Reads happen only after
-        // poll says there is data, so only the input writes see EAGAIN.
-        errno(
-            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
-            (),
-        )?;
-    }
     let forwarder = Forwarder::start(master.as_ref().map(OwnedFd::try_clone).transpose()?);
     let mut child = command.spawn()?;
     // The command's copies of the terminal's other end are closed with it, so reading the master
@@ -418,41 +399,23 @@ pub(crate) fn run(mut command: Command, mut log: Option<File>) -> io::Result<Exi
     caller.group = Some(pid);
     caller.take();
 
+    // A client in the terminal's background would be stopped (SIGTTIN) for reading it.
+    if let Some(to_master) = to_master
+        && stdin_tty
+        && Caller::in_foreground()
+    {
+        forward_input(to_master);
+    }
     if let Some(master) = master {
-        // A client in the terminal's background would be stopped (SIGTTIN) for reading it.
-        if let Some(to_master) = &to_master
-            && stdin_tty
-            && Caller::in_foreground()
-        {
-            // SAFETY: dup returns a new fd (or -1, checked) that only the source owns.
-            let fd = unsafe { libc::dup(libc::STDIN_FILENO) };
-            if fd >= 0 {
-                sources.push(Source {
-                    // SAFETY: as above.
-                    fd: unsafe { OwnedFd::from_raw_fd(fd) },
-                    output: false,
-                });
-                sinks.push(to_master.as_raw_fd());
-            }
-        }
         sinks.push(libc::STDOUT_FILENO);
-        sources.push(Source {
-            fd: master,
-            output: true,
-        });
+        sources.push(master);
     } else if let Some(stdout) = child.stdout.take() {
         sinks.push(libc::STDOUT_FILENO);
-        sources.push(Source {
-            fd: stdout.into(),
-            output: true,
-        });
+        sources.push(stdout.into());
     }
     if let Some(stderr) = child.stderr.take() {
         sinks.push(libc::STDERR_FILENO);
-        sources.push(Source {
-            fd: stderr.into(),
-            output: true,
-        });
+        sources.push(stderr.into());
     }
 
     let done = AtomicBool::new(false);
@@ -461,15 +424,8 @@ pub(crate) fn run(mut command: Command, mut log: Option<File>) -> io::Result<Exi
         let log = log.as_mut();
         let sinks = &sinks;
         scope.spawn(move || {
-            let outputs: Vec<bool> = sources.iter().map(|s| s.output).collect();
             pump(sources, log, done, |i, chunk| {
-                // Input the command's terminal has no room for is dropped, as a full terminal
-                // drops it, rather than stop the copying of the output.
-                let input = !outputs[i];
-                match write_fd(sinks[i], chunk, input) {
-                    Err(e) if input && e.kind() == io::ErrorKind::WouldBlock => true,
-                    written => written.is_ok(),
-                }
+                write_fd(sinks[i], chunk).is_ok()
             });
         });
         let status = wait(pid, &caller);
@@ -478,6 +434,29 @@ pub(crate) fn run(mut command: Command, mut log: Option<File>) -> io::Result<Exi
     });
     drop(caller);
     status
+}
+
+/// Copies the caller's stdin to the command's terminal on a thread of its own, so input the command
+/// does not read waits there (as it would on a terminal) without holding up the copy of its
+/// output. The thread ends at stdin's end or when the terminal is gone, else with the process.
+fn forward_input(to_master: OwnedFd) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            // SAFETY: `buf` is valid for `buf.len()` bytes.
+            let got = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
+            match usize::try_from(got) {
+                Ok(0) => return,
+                Ok(n) => {
+                    if write_fd(to_master.as_raw_fd(), &buf[..n]).is_err() {
+                        return;
+                    }
+                }
+                Err(_) if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    });
 }
 
 /// Waits for `pid` to end. When it stops (Ctrl-Z), the client gives the terminal back and stops

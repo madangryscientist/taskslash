@@ -2,7 +2,7 @@
 //! daemon decides how many run at once instead of moon's `--concurrency`.
 
 use crate::Error;
-use crate::capture::{Source, pump};
+use crate::capture::pump;
 use crate::client::{Demand, Job, Report, run_job};
 use crate::moon::{self, Node};
 use crate::protocol::Class;
@@ -235,17 +235,11 @@ fn exec(
     // Whether each source is stdout (else stderr).
     let mut is_stdout = Vec::new();
     if let Some(stdout) = child.stdout.take() {
-        sources.push(Source {
-            fd: stdout.into(),
-            output: true,
-        });
+        sources.push(stdout.into());
         is_stdout.push(true);
     }
     if let Some(stderr) = child.stderr.take() {
-        sources.push(Source {
-            fd: stderr.into(),
-            output: true,
-        });
+        sources.push(stderr.into());
         is_stdout.push(false);
     }
     let marker = format!("{target} (cached");

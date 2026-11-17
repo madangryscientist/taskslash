@@ -411,17 +411,24 @@ fn logs_follows_a_running_job_until_it_ends() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    let follow = scratch
+    let mut follow = scratch
         .command(&["logs", &n.to_string(), "-f"])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    thread::sleep(Duration::from_millis(300));
+    // Once `-f` has printed the first line, it has found the job running: let the job end.
+    let mut stdout = follow.stdout.take().unwrap();
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 64];
+    while !seen.ends_with(b"one\n") {
+        let n = stdout.read(&mut buf).unwrap();
+        assert!(n > 0, "-f ended early: {seen:?}");
+        seen.extend_from_slice(&buf[..n]);
+    }
     fs::write(scratch.dir.join("go"), "").unwrap();
-    let followed = follow.wait_with_output().unwrap();
-    assert_eq!(followed.status.code(), Some(0), "{followed:?}");
-    assert_eq!(text(&followed.stdout), "one\ntwo\n");
+    stdout.read_to_end(&mut seen).unwrap();
+    assert_eq!(follow.wait().unwrap().code(), Some(0));
+    assert_eq!(text(&seen), "one\ntwo\n");
     assert_eq!(job.wait().unwrap().code(), Some(0));
     let after = scratch.run(&["logs", &n.to_string()]);
     assert_eq!(after.status.code(), Some(1));
