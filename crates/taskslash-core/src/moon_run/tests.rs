@@ -1,6 +1,8 @@
 //! The runner's order, skip rule and summary, with a stand-in for the daemon job.
 
 use super::*;
+use std::fs;
+use std::path::PathBuf;
 
 fn node(target: &str, deps: &[usize]) -> Node {
     let (project, task) = target.split_once(':').unwrap();
@@ -84,4 +86,55 @@ fn a_node_that_panics_fails_and_the_rest_still_end() {
     });
     let states: Vec<&str> = ends.iter().map(|e| e.state.as_str()).collect();
     assert_eq!(states, ["fail", "skipped", "pass"]);
+}
+
+/// A fresh directory under `TMPDIR` (not a hardcoded `/tmp`), removed on drop.
+struct Dir(PathBuf);
+
+impl Dir {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("tkgate-{}-{n}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn the_workspace_bin_goes_in_front_when_it_exists() {
+    let root = Dir::new();
+    fs::create_dir_all(root.0.join("node_modules/.bin")).unwrap();
+    let inherited = env::join_paths(["/usr/bin", "/bin"]).unwrap();
+    let path = gate_path(&root.0, Some(inherited)).expect("a path");
+    let dirs: Vec<PathBuf> = env::split_paths(&path).collect();
+    assert_eq!(
+        dirs,
+        [
+            root.0.join("node_modules/.bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ]
+    );
+}
+
+#[test]
+fn the_path_is_left_as_it_was_without_a_workspace_bin() {
+    let root = Dir::new();
+    let inherited = OsString::from("/usr/bin:/bin");
+    assert_eq!(gate_path(&root.0, Some(inherited.clone())), None);
+    assert_eq!(gate_path(&root.0, None), None);
+}
+
+#[test]
+fn an_unset_path_is_left_unset_even_with_a_workspace_bin() {
+    let root = Dir::new();
+    fs::create_dir_all(root.0.join("node_modules/.bin")).unwrap();
+    assert_eq!(gate_path(&root.0, None), None);
 }

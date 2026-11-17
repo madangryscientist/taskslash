@@ -8,3 +8,7 @@ tasks:
   lint:
     command: "true"
     deps: ["b:typecheck"]
+  # A bare package binary, as the gate's tsc and oxlint are: found only on the workspace's
+  # node_modules/.bin, which the test puts there.
+  bare:
+    command: "fixture-tool"
