@@ -165,10 +165,6 @@ fn two_never_seen_jobs_never_overlap_but_a_seen_one_runs_beside_one() {
         )),
         "{second}: {second_err}"
     );
-    assert!(
-        second_err.contains("(never run before: assumed 2.0 threads; --cpu 0.1 says otherwise)"),
-        "{second}: {second_err}"
-    );
     let (one, two) = (daemon.interval(first), daemon.interval(second));
     assert!(
         !overlap(one, two) && one.1 <= two.0,

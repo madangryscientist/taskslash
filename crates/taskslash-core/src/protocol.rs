@@ -227,9 +227,9 @@ pub enum DaemonMessage {
         log: String,
     },
     /// Job `job` is queued, for `reason`, and has waited `waited_s`, `position` (1-based) in the
-    /// queue's order; `start` follows when it is admitted. `never_seen` says its key has no
-    /// finished run and the caller did not vouch for it, and `assumed_threads` is then the CPU its
-    /// kind is assumed to take. A daemon older than `job` leaves all three out.
+    /// queue's order; `start` follows when it is admitted. On the first `waiting` only, `never_seen`
+    /// says its key has no finished run and the caller did not vouch for it, and `assumed_threads`
+    /// is then the CPU its kind is assumed to take. A daemon older than `job` leaves all three out.
     Waiting {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         job: Option<u64>,

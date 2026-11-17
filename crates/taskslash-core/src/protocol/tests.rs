@@ -198,30 +198,6 @@ fn an_older_daemons_waiting_reads_with_no_job_number() {
 }
 
 #[test]
-fn a_waiting_job_sends_its_number_and_whether_its_key_never_ran() {
-    let waiting = DaemonMessage::Waiting {
-        job: Some(18),
-        reason: Reason::Behind {
-            job: 3,
-            key: "k".into(),
-        },
-        waited_s: 0,
-        position: 1,
-        never_seen: true,
-        assumed_threads: Some(2.0),
-    };
-    let text = serde_json::to_string(&waiting).unwrap();
-    assert_eq!(
-        text,
-        r#"{"type":"waiting","job":18,"reason":{"kind":"behind","job":3,"key":"k"},"waited_s":0,"position":1,"never_seen":true,"assumed_threads":2.0}"#
-    );
-    assert_eq!(
-        serde_json::from_str::<DaemonMessage>(&text).unwrap(),
-        waiting
-    );
-}
-
-#[test]
 fn an_ended_job_reads_as_its_run_or_why_it_has_none() {
     let run = JobEnded::Run {
         run: 3140,

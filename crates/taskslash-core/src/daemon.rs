@@ -372,10 +372,15 @@ impl Daemon {
             None => (None, None, None),
         };
         // Asked after the scheduler, as `log` does: a job is remembered as ended before it leaves.
-        let ended = match state {
-            JobState::NotFound => self
-                .ended_job(job)
-                .and_then(|ended| self.job_ended_as(ended)),
+        let ended = match (state, self.ended_job(job)) {
+            (JobState::NotFound, Some(ended)) => match self.job_ended_as(ended) {
+                Ok(ended) => Some(ended),
+                Err(e) => {
+                    return DaemonMessage::Error {
+                        message: e.to_string(),
+                    };
+                }
+            },
             _ => None,
         };
         DaemonMessage::Why {
@@ -388,17 +393,17 @@ impl Daemon {
         }
     }
 
-    /// An ended job as `why` reports it; `None` when its run cannot be read back.
-    fn job_ended_as(&self, ended: Ended) -> Option<JobEnded> {
-        Some(match ended {
-            Ended::Run(id) => {
-                let run = self.store().run(id).ok().flatten()?;
-                JobEnded::Run {
+    /// An ended job as `why` reports it; a run that is not in the store reads as unrecorded.
+    fn job_ended_as(&self, ended: Ended) -> Result<JobEnded, Error> {
+        Ok(match ended {
+            Ended::Run(id) => match self.store().run(id)? {
+                Some(run) => JobEnded::Run {
                     run: run.id,
                     key: run.key,
                     exit_code: run.exit_code,
-                }
-            }
+                },
+                None => JobEnded::Unrecorded,
+            },
             Ended::Recording => JobEnded::Recording,
             Ended::Unrecorded => JobEnded::Unrecorded,
             Ended::NoRun => JobEnded::NeverRan,

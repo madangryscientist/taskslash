@@ -132,10 +132,8 @@ impl Daemon {
                     }
                     Err(RecvTimeoutError::Timeout) if told.elapsed() >= TELL_EVERY => {
                         told = Instant::now();
-                        let (now, never_seen) = {
-                            let scheduler = self.scheduler();
-                            (scheduler.waiting(id), scheduler.never_seen(id))
-                        };
+                        // The never-run hint goes on the first line only, so it is not sent again.
+                        let now = self.scheduler().waiting(id);
                         if let Some((reason, waited_s, position)) = now {
                             let _ = send(
                                 writer,
@@ -144,8 +142,8 @@ impl Daemon {
                                     reason,
                                     waited_s,
                                     position,
-                                    never_seen,
-                                    assumed_threads: never_seen.then(|| kind.default_cpu_threads()),
+                                    never_seen: false,
+                                    assumed_threads: None,
                                 },
                             );
                         }
