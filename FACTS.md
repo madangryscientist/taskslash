@@ -1,6 +1,6 @@
 # TaskSlash facts
 
-Checked against main at 95af709 on 2026-11-17.
+Checked against main at ccdb25a on 2026-11-17.
 
 ## What it is
 TaskSlash stops builds and tests that start at the same time from overloading one computer: each one waits in a queue until the machine has room for it. It is early (alpha), version 0.1.0.
@@ -17,6 +17,7 @@ TaskSlash stops builds and tests that start at the same time from overloading on
 - `job-logs`: Every job's output is kept in a log file of its own until it passes a set age or the logs pass a set size, and `taskslash logs` prints it, by job, run, name or the last failure.
 - `history`: `taskslash history <name>` prints a job's estimate and what its last runs cost.
 - `status`: `taskslash status` shows the machine's load, pressure, memory, disks and the running and waiting jobs, also as JSON.
+- `top`: `taskslash top` shows the machine's load and pressure, the running and waiting jobs, the jobs finished since it opened, and the selected job's output on one live terminal screen.
 - `events`: `taskslash events` prints one JSON line per job queued, started and finished, for other tools to follow.
 - `command-plugins`: A program named `taskslash-<name>` on `PATH` runs as `taskslash <name>` unless `<name>` is a built-in command, and `taskslash plugins` lists them.
 - `desktop-proof`: On one desktop, three gates and two browser runs started together stayed under the pressure lines through TaskSlash, and the whole load finished sooner than without it, though each browser run took longer (docs/proof/phase-1.md).
