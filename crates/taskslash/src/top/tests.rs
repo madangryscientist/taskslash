@@ -158,14 +158,14 @@ fn a_selected_job_that_leaves_the_list_hands_the_selection_to_its_place() {
 fn appended_log_bytes_come_out_stripped_and_only_new_lines_are_added() {
     let mut app = App::new();
     app.log_reset("/logs/1.log", b"\x1b[32mok\x1b[0m one\nhalf \x1b[3");
-    assert_eq!(app.log_lines(), ["ok one", "half "]);
+    assert_eq!(app.log_lines(usize::MAX), ["ok one", "half "]);
     app.log_append(b"1mway\x1b[0m\n\x1b]0;title\x07two\tthree\r\nbar 10%\rbar 100%\n\x07");
     assert_eq!(
-        app.log_lines(),
+        app.log_lines(usize::MAX),
         ["ok one", "half way", "two    three", "bar 100%"]
     );
     app.log_append(b"");
-    assert_eq!(app.log_lines().len(), 4);
+    assert_eq!(app.log_lines(usize::MAX).len(), 4);
 }
 
 #[test]
@@ -288,4 +288,43 @@ fn a_log_tail_reads_the_end_then_only_what_is_appended() {
     std::fs::write(&path, "short\n").unwrap();
     assert_eq!(tail.read().unwrap(), (true, b"short\n".to_vec()));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_progress_line_without_a_newline_keeps_only_its_last_state() {
+    let mut app = App::new();
+    app.log_reset("/logs/1.log", b"done\n");
+    for n in 0..20_000 {
+        app.log_append(format!("\rBuilding {n}/20000").as_bytes());
+    }
+    assert!(
+        app.output.partial.len() < 64,
+        "{}",
+        app.output.partial.len()
+    );
+    assert_eq!(app.log_lines(usize::MAX), ["done", "Building 19999/20000"]);
+    // A carriage return at the end may be half of a CRLF: the text before it stays.
+    app.log_append(b"\r");
+    app.log_append(b"\n");
+    assert_eq!(app.log_lines(usize::MAX), ["done", "Building 19999/20000"]);
+    // One endless line is capped.
+    app.log_append(&[b'x'; 100_000]);
+    assert!(app.output.partial.len() <= 16 * 1024);
+    assert_eq!(app.log_lines(2).len(), 2);
+    assert_eq!(app.log_lines(1)[0].len(), 16 * 1024);
+}
+
+#[test]
+fn following_the_events_again_forgets_the_old_daemon_s_job_numbers() {
+    let mut app = App::new();
+    app.event(queued(1, "old"));
+    app.event(finished(1, "old", Some("/logs/old-1.log")));
+    app.notice("events: the daemon closed the event stream; trying again".into());
+    app.resubscribed();
+    // The restarted daemon numbers from 1 again.
+    app.status(status(vec![running(1, "new")], vec![]));
+    assert_eq!(jobs(&app), [1]);
+    assert!(matches!(app.rows()[0], Row::Running(j) if j.key == "new"));
+    assert_eq!(app.pane(), Pane::Log("/logs/1.log"));
+    assert_eq!(app.notice, None);
 }

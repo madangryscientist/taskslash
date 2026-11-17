@@ -25,6 +25,8 @@ mod tests;
 const RECENT: usize = 50;
 /// How many lines of a log the pane keeps.
 const KEEP_LINES: usize = 2000;
+/// The most bytes of an unfinished last line the pane keeps.
+const PARTIAL: usize = 16 * 1024;
 
 /// What `top` knows about a job before it finishes, for the row of a finished one.
 #[derive(Debug, Clone, PartialEq)]
@@ -291,6 +293,20 @@ impl App {
                 out.lines.pop_front();
             }
         }
+        // A progress line rewritten with carriage returns and no newline: only what follows the
+        // last carriage return is shown (a final one may still be half of a CRLF), and at most
+        // PARTIAL bytes of it are kept.
+        let len = out.partial.len();
+        if let Some(cr) = out.partial[..len.saturating_sub(1)]
+            .iter()
+            .rposition(|&b| b == b'\r')
+        {
+            out.partial.drain(..=cr);
+        }
+        if out.partial.len() > PARTIAL {
+            let cut = out.partial.len() - PARTIAL;
+            out.partial.drain(..cut);
+        }
     }
 
     /// The log at `path` cannot be read.
@@ -302,14 +318,25 @@ impl App {
         };
     }
 
-    /// The log lines read so far, cleaned, the unfinished last line included.
-    pub fn log_lines(&self) -> Vec<String> {
-        let mut lines: Vec<String> = self.output.lines.iter().cloned().collect();
+    /// The last `n` log lines read so far, cleaned, the unfinished last line included.
+    pub fn log_lines(&self, n: usize) -> Vec<String> {
         let partial = clean(&self.output.partial);
-        if !partial.is_empty() {
-            lines.push(partial);
-        }
+        let partial = (!partial.is_empty()).then_some(partial);
+        let whole = n.saturating_sub(usize::from(partial.is_some()));
+        let from = self.output.lines.len().saturating_sub(whole);
+        let mut lines: Vec<String> = self.output.lines.range(from..).cloned().collect();
+        lines.extend(partial);
         lines
+    }
+
+    /// The event stream was lost and is followed again: the daemon went away, and one that
+    /// started again numbers its jobs from 1, so the finished jobs and what was remembered for
+    /// them are dropped, and so is the notice that said the stream was lost.
+    pub fn resubscribed(&mut self) {
+        self.recent.clear();
+        self.known.clear();
+        self.notice = None;
+        self.keep_selection();
     }
 }
 
@@ -382,10 +409,11 @@ fn worktree(submitter: &str) -> &str {
         .unwrap_or(submitter)
 }
 
+/// How a finished job ended. A job that never started has no exit code (the daemon sends null).
 fn exit_text(r: &Recent) -> String {
     match (&r.log, r.exit_code) {
         (None, _) => "never started".to_owned(),
-        (Some(_), None) => "no exit code (its client went away)".to_owned(),
+        (Some(_), None) => "no exit code".to_owned(),
         (Some(_), Some(code)) => format!("exit {code}"),
     }
 }
@@ -439,12 +467,10 @@ pub fn row_text(row: Row<'_>) -> String {
             w.class.to_string(),
         ),
         Row::Recent(r) => {
-            let wall = duration(r.wall_ms as f64 / 1000.0);
-            let mut state = match (&r.log, r.exit_code) {
-                (None, _) => "never started".to_owned(),
-                (Some(_), Some(code)) => format!("exit {code} {wall}"),
-                (Some(_), None) => format!("no exit {wall}"),
-            };
+            let mut state = exit_text(r);
+            if r.log.is_some() {
+                state = format!("{state} {}", duration(r.wall_ms as f64 / 1000.0));
+            }
             if r.cached == Some(true) {
                 state.push_str(" cached");
             }
@@ -529,24 +555,13 @@ fn render_pane(app: &App, frame: &mut Frame, area: Rect) {
     let lines: Vec<Line> = match app.pane() {
         Pane::Nothing => vec![Line::from("no job selected")],
         Pane::Waiting(reason) => vec![Line::from(format!("waiting: {reason}"))],
-        Pane::NeverStarted => {
-            let exit = row.map_or(String::new(), |r| match r {
-                Row::Recent(r) => match r.exit_code {
-                    Some(code) => format!(", exit {code}"),
-                    None => ", no exit code".to_owned(),
-                },
-                _ => String::new(),
-            });
-            vec![Line::from(format!(
-                "never started: it left the queue before it was admitted{exit}"
-            ))]
-        }
+        Pane::NeverStarted => vec![Line::from(
+            "never started: it left the queue before it was admitted, so it has no exit code",
+        )],
         Pane::Log(path) => match (&app.output.path, &app.output.error) {
             (Some(p), Some(e)) if p == path => vec![Line::from(e.clone())],
             (Some(p), None) if p == path => {
-                let all = app.log_lines();
-                let from = all.len().saturating_sub(height);
-                all[from..].iter().cloned().map(Line::from).collect()
+                app.log_lines(height).into_iter().map(Line::from).collect()
             }
             _ => vec![Line::from(format!("reading {path}"))],
         },

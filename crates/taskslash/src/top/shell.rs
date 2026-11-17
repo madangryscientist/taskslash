@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
-use taskslash_core::Error;
 use taskslash_core::protocol::{JobEvent, Status};
+use taskslash_core::{Error, Subscription};
 
 /// How much of a log is read when it is selected, and the most read in one go after that.
 const TAIL: u64 = 64 * 1024;
@@ -27,20 +27,25 @@ enum Message {
     Status(Result<Status, Error>),
     Event(JobEvent),
     Notice(String),
+    /// The event stream was lost and is followed again.
+    Resubscribed,
 }
 
 /// Runs `taskslash top` against the daemon at `socket` until a quit key. An `Err` before the
 /// screen is entered: no daemon answers (exit 1), or stdout is not a terminal (a usage error).
 pub fn run(socket: &Path) -> Result<i32, Error> {
-    let first = taskslash_core::status(socket)?;
+    taskslash_core::status(socket)?;
     if !io::stdout().is_terminal() {
         return Err(Error::usage("top needs a terminal, and stdout is not one"));
     }
+    // Subscribed before the status that fills the list, so each job in it or queued after it is
+    // known when its `finished` comes.
+    let subscription = taskslash_core::subscribe(socket)?;
     let mut app = App::new();
-    app.status(first);
+    app.status(taskslash_core::status(socket)?);
 
     let (tx, rx) = mpsc::channel();
-    spawn_events(socket.to_owned(), tx.clone());
+    spawn_events(socket.to_owned(), subscription, tx.clone());
     spawn_status(socket.to_owned(), tx);
 
     let mut terminal =
@@ -73,6 +78,7 @@ pub fn run(socket: &Path) -> Result<i32, Error> {
                 Message::Status(Err(e)) => app.status_failed(e.to_string()),
                 Message::Event(event) => app.event(event),
                 Message::Notice(text) => app.notice(text),
+                Message::Resubscribed => app.resubscribed(),
             }
         }
         let wanted = app.wanted_log().map(str::to_owned);
@@ -94,13 +100,15 @@ pub fn run(socket: &Path) -> Result<i32, Error> {
     }
 }
 
-/// Follows the events on a thread of its own, subscribing again a second after the stream ends.
-fn spawn_events(socket: PathBuf, tx: Sender<Message>) {
+/// Follows the events on a thread of its own. When the stream ends it says so and subscribes
+/// again every second; once that works, the app is told.
+fn spawn_events(socket: PathBuf, first: Subscription, tx: Sender<Message>) {
     thread::spawn(move || {
+        let mut subscription = Ok(first);
         loop {
-            let result =
-                taskslash_core::subscribe(&socket, |event| tx.send(Message::Event(event)).is_ok());
-            let why = match result {
+            let why = match subscription
+                .and_then(|s| s.each(|event| tx.send(Message::Event(event)).is_ok()))
+            {
                 Ok(()) => "the daemon closed the event stream".to_owned(),
                 Err(e) => e.to_string(),
             };
@@ -109,6 +117,10 @@ fn spawn_events(socket: PathBuf, tx: Sender<Message>) {
                 return;
             }
             thread::sleep(STATUS_EVERY);
+            subscription = taskslash_core::subscribe(&socket);
+            if subscription.is_ok() && tx.send(Message::Resubscribed).is_err() {
+                return;
+            }
         }
     });
 }

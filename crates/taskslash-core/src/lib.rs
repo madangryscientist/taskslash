@@ -33,7 +33,7 @@ mod scheduler;
 mod socket;
 mod store;
 
-pub use client::{Demand, events, history, logs, run, status, subscribe, why};
+pub use client::{Demand, Subscription, events, history, logs, run, status, subscribe, why};
 pub use daemon::serve;
 pub use moon_run::moon;
 pub use socket::socket_path;

@@ -20,7 +20,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 /// The exit code when the command cannot be started, as a shell uses.
@@ -292,30 +292,44 @@ pub fn events(socket: &Path, out: &mut impl Write) -> Result<(), Error> {
     }
 }
 
-/// Subscribes to the daemon's job events and hands each one, parsed, to `on_event`, until the
-/// daemon hangs up or `on_event` returns false (both `Ok`). A line that is not an event this client
-/// knows (a newer event type) is skipped.
-pub fn subscribe(socket: &Path, mut on_event: impl FnMut(JobEvent) -> bool) -> Result<(), Error> {
+/// Subscribes to the daemon's job events. Returns once the daemon has answered `subscribed`, so
+/// every event from then on reaches [`Subscription::each`].
+pub fn subscribe(socket: &Path) -> Result<Subscription, Error> {
     let mut daemon = Connection::open(socket)?;
     match daemon.ask(&ClientMessage::Subscribe)? {
-        DaemonMessage::Subscribed { .. } => {}
-        other => return Err(Error::new(format!("unexpected reply {other:?}"))),
+        DaemonMessage::Subscribed { .. } => Ok(Subscription {
+            reader: daemon.reader,
+            socket: socket.to_owned(),
+        }),
+        other => Err(Error::new(format!("unexpected reply {other:?}"))),
     }
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if daemon
-            .reader
-            .read_line(&mut line)
-            .map_err(|e| daemon.lost(e))?
-            == 0
-        {
-            return Ok(());
-        }
-        if let Ok(DaemonMessage::Event { event, .. }) = serde_json::from_str(&line)
-            && !on_event(event)
-        {
-            return Ok(());
+}
+
+/// A subscription to the daemon's job events, from [`subscribe`].
+pub struct Subscription {
+    reader: BufReader<UnixStream>,
+    socket: PathBuf,
+}
+
+impl Subscription {
+    /// Hands each event, parsed, to `on_event`, until the daemon hangs up or `on_event` returns
+    /// false (both `Ok`). A line that is not an event this client knows (a newer event type) is
+    /// skipped.
+    pub fn each(mut self, mut on_event: impl FnMut(JobEvent) -> bool) -> Result<(), Error> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = self.reader.read_line(&mut line).map_err(|e| {
+                Error::new(format!("lost the daemon at {}: {e}", self.socket.display()))
+            })?;
+            if read == 0 {
+                return Ok(());
+            }
+            if let Ok(DaemonMessage::Event { event, .. }) = serde_json::from_str(&line)
+                && !on_event(event)
+            {
+                return Ok(());
+            }
         }
     }
 }
@@ -391,11 +405,13 @@ mod tests {
             .unwrap();
         });
         let mut got = Vec::new();
-        subscribe(&socket, |event| {
-            got.push(event);
-            true
-        })
-        .unwrap();
+        subscribe(&socket)
+            .unwrap()
+            .each(|event| {
+                got.push(event);
+                true
+            })
+            .unwrap();
         daemon.join().unwrap();
         fs::remove_dir_all(&dir).unwrap();
         assert_eq!(
