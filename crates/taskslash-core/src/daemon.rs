@@ -30,8 +30,11 @@ const SAMPLE_EVERY: Duration = Duration::from_secs(1);
 /// How often expired logs are deleted, besides at startup.
 const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 
+mod ended;
 mod events;
 mod job;
+
+use ended::{ENDED_JOBS, Ended, EndedJobs};
 
 /// What every connection shares. Lock order: `scheduler` before `store`, never the other way.
 struct Daemon {
@@ -45,6 +48,8 @@ struct Daemon {
     scheduler: Mutex<Scheduler>,
     /// The subscribers to the job events.
     events: events::Bus,
+    /// The newest jobs that ended since it started, and their runs. Locked on its own.
+    ended: Mutex<EndedJobs>,
 }
 
 /// Binds the socket at `path`, opens the database at `db`, and serves until the process is killed.
@@ -79,6 +84,7 @@ pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
         scheduler: Mutex::new(Scheduler::new(limits, first.clone())),
         machine: Mutex::new(first),
         events: events::Bus::default(),
+        ended: Mutex::new(EndedJobs::new(ENDED_JOBS)),
     });
     let sampling = Arc::clone(&daemon);
     thread::spawn(move || sampling.sample_forever(machine));
@@ -101,6 +107,20 @@ pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// A recorded run as `log` answers it: the run, its log and whose it is.
+fn recorded(run: Option<Run>) -> Option<LogFound> {
+    run.map(|run| LogFound {
+        job: None,
+        run: Some(run.id),
+        log_path: run.log_path,
+        never_ran: false,
+        key: Some(run.key),
+        submitter: Some(run.submitter),
+        exit_code: run.exit_code,
+        started_at: Some(run.started_at),
+    })
 }
 
 /// The real sampler, or the fake one `TASKSLASH_FAKE_MACHINE` names (for tests).
@@ -242,28 +262,49 @@ impl Daemon {
 
     /// The job or run `select` picks, and its log.
     fn log(&self, select: LogSelect) -> Result<Option<LogFound>, Error> {
-        let recorded = |run: Option<Run>| {
-            run.map(|run| LogFound {
-                job: None,
-                run: Some(run.id),
-                log_path: run.log_path,
+        let held = |job: u64| {
+            self.scheduler().held(job).map(|(held, started)| LogFound {
+                job: Some(job),
+                log_path: started.map(|_| held.log.to_string_lossy().into_owned()),
+                key: Some(held.key.clone()),
+                submitter: Some(held.submitter.clone()),
+                started_at: started.map(procfs::rfc3339),
+                ..LogFound::default()
             })
         };
-        let held = |job: u64, (path, running): (PathBuf, bool)| LogFound {
-            job: Some(job),
-            run: None,
-            log_path: running.then(|| path.to_string_lossy().into_owned()),
-        };
         Ok(match select {
-            LogSelect::Job { job } => self.scheduler().log(job).map(|found| held(job, found)),
+            // A job is remembered as ended before it leaves the scheduler, so asking `held` first
+            // and `ended` second never misses one that ends in between.
+            LogSelect::Job { job } => match held(job) {
+                Some(found) => Some(found),
+                None => match self.ended_job(job) {
+                    Some(Ended::Run(run)) => recorded(self.store().run(run)?),
+                    Some(Ended::Recording) => {
+                        return Err(Error::new(format!(
+                            "job {job} is ending; ask again in a moment"
+                        )));
+                    }
+                    Some(Ended::Unrecorded) => {
+                        return Err(Error::new(format!(
+                            "job {job} ran, but its run could not be recorded, so its log \
+                             cannot be found by number"
+                        )));
+                    }
+                    Some(Ended::NoRun) => Some(LogFound {
+                        job: Some(job),
+                        never_ran: true,
+                        ..LogFound::default()
+                    }),
+                    None => None,
+                },
+            },
             LogSelect::Run { run } => recorded(self.store().run(run)?),
             LogSelect::Last { key } => {
                 let running = {
                     let scheduler = self.scheduler();
-                    scheduler.last_running(&key).and_then(|(job, at)| {
-                        scheduler.log(job).map(|found| (held(job, found), at))
-                    })
+                    scheduler.last_running(&key)
                 };
+                let running = running.and_then(|(job, at)| held(job).map(|found| (found, at)));
                 let run = self.store().last(&key)?;
                 match (running, run) {
                     (Some((_, at)), Some(run)) if run.started_at > procfs::rfc3339(at) => {
@@ -273,8 +314,21 @@ impl Daemon {
                     (None, run) => recorded(run),
                 }
             }
-            LogSelect::Failed { key } => recorded(self.store().last_failed(key.as_deref())?),
+            LogSelect::Failed { key, within } => recorded(
+                self.store()
+                    .last_failed(key.as_deref(), within.as_deref())?,
+            ),
         })
+    }
+
+    /// What became of ended job `job`, when it is remembered.
+    fn ended_job(&self, job: u64) -> Option<Ended> {
+        lock(&self.ended).get(job)
+    }
+
+    /// Remembers that job `job` ended as `ended`, for `logs <n>`.
+    fn job_ended(&self, job: u64, ended: Ended) {
+        lock(&self.ended).insert(job, ended);
     }
 
     /// Deletes the expired logs. The scheduler stays locked throughout, so no job starts or ends

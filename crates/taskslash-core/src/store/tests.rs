@@ -191,11 +191,30 @@ fn a_run_with_no_exit_code_is_not_a_failure_and_log_ends_add_the_wall_time() {
     // Newer, but its client went away: no exit code, so not a failure.
     record(2000, None);
     assert_eq!(
-        store.last_failed(Some("k")).unwrap().map(|r| r.id),
+        store.last_failed(Some("k"), None).unwrap().map(|r| r.id),
         Some(failed)
     );
     // Started at 1000 ms and ran 12 ms.
     assert!(store.log_ends().unwrap().contains(&("/l".to_owned(), 1012)));
+}
+
+#[test]
+fn last_failed_within_a_submitter_keeps_only_its_runs() {
+    let store = Store::in_memory();
+    let argv = words(&["sh", "-c", "x"]);
+    let mine = store.record(&at("k", "/w/mine", &argv, 1000, 2)).unwrap();
+    store.record(&at("k", "/w/mine", &argv, 1500, 0)).unwrap();
+    let theirs = store.record(&at("j", "/w/theirs", &argv, 2000, 1)).unwrap();
+    store
+        .record(&at("k", "/w/notmine", &argv, 3000, 1))
+        .unwrap();
+    let id = |key, within| store.last_failed(key, within).unwrap().map(|r| r.id);
+    assert_eq!(id(None, Some("/w/mine")), Some(mine));
+    assert_eq!(id(None, Some("mine")), Some(mine), "its directory name");
+    assert_eq!(id(Some("j"), Some("/w/theirs")), Some(theirs));
+    assert_eq!(id(Some("j"), Some("/w/mine")), None);
+    assert_eq!(id(None, Some("/w/nobody")), None);
+    assert_ne!(id(None, None), Some(mine), "the whole machine's newest");
 }
 
 fn at<'a>(

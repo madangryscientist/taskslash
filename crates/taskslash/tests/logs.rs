@@ -350,22 +350,141 @@ fn logs_picks_a_run_by_id_newest_and_newest_failed() {
         let mut all = vec!["logs"];
         all.extend_from_slice(args);
         let out = scratch.run(&all);
-        (out.status.code(), text(&out.stdout), text(&out.stderr))
+        (out.status.code(), text(&out.stdout))
     };
-    let ok = |s: &str| (Some(0), s.to_owned(), String::new());
-    let refused = |s: &str| (Some(1), String::new(), format!("taskslash: {s}\n"));
+    let ok = |s: &str| (Some(0), s.to_owned());
+    let refused = |args: &[&str], s: &str| {
+        let mut all = vec!["logs"];
+        all.extend_from_slice(args);
+        let out = scratch.run(&all);
+        assert_eq!(
+            (out.status.code(), text(&out.stdout), text(&out.stderr)),
+            (Some(1), String::new(), format!("taskslash: {s}\n"))
+        );
+    };
     assert_eq!(logs(&["--run", &ids[2].to_string()]), ok("one\n"));
     assert_eq!(logs(&["--last", "k"]), ok("five\n"));
+    // Every run here was submitted from the scratch directory, so this worktree's newest is the
+    // machine's.
     assert_eq!(logs(&["--failed"]), ok("four\n"), "a signal's 128+N counts");
     assert_eq!(logs(&["--failed", "k"]), ok("two\n"));
-    assert_eq!(
-        logs(&["--failed", "other"]),
-        refused("no failed run of other")
+    refused(
+        &["--failed", "other"],
+        &format!(
+            "no failed run of other in {}; taskslash logs --failed other --all searches the \
+             whole machine",
+            scratch.dir.file_name().unwrap().to_str().unwrap()
+        ),
     );
-    assert_eq!(logs(&["--last", "nope"]), refused("no run of nope"));
-    assert_eq!(logs(&["99"]), refused("no job 99"));
-    assert_eq!(logs(&["--run", "999"]), refused("no run 999"));
+    refused(&["--last", "nope"], "no run of nope");
+    refused(
+        &["99"],
+        "no job 99 (the daemon restarted or forgot it); find the run with taskslash history \
+         <key>, then taskslash logs --run <id>",
+    );
+    refused(&["--run", "999"], "no run 999");
     assert_eq!(logs(&[]).0, Some(2), "a usage error");
+    assert_eq!(logs(&["--all"]).0, Some(2), "--all only with --failed");
+    assert_eq!(logs(&["--last", "k", "--all"]).0, Some(2));
+}
+
+#[test]
+fn failed_shows_this_worktrees_failure_with_a_header_and_all_the_machines() {
+    let scratch = Scratch::new(None);
+    let _daemon = scratch.daemon(&[]);
+    // Three worktrees: `.git` files, as `git worktree add` leaves them.
+    let tree = |name: &str| {
+        let dir = scratch.dir.join(name);
+        fs::create_dir_all(dir.join("deep")).unwrap();
+        fs::write(dir.join(".git"), "gitdir: /nowhere\n").unwrap();
+        dir.join("deep")
+    };
+    let (mine, theirs, clean) = (tree("mine"), tree("theirs"), tree("clean"));
+    let in_dir = |dir: &Path, args: &[&str]| {
+        let out = scratch.command(args).current_dir(dir).output().unwrap();
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
+    };
+    in_dir(
+        &mine,
+        &["run", "--name", "k", "--", "sh", "-c", "echo mine; exit 3"],
+    );
+    in_dir(
+        &theirs,
+        &[
+            "run",
+            "--name",
+            "j",
+            "--",
+            "sh",
+            "-c",
+            "echo theirs; exit 4",
+        ],
+    );
+    in_dir(
+        &clean,
+        &["run", "--name", "k", "--", "sh", "-c", "echo fine"],
+    );
+    let mine_id = scratch.history("k")[1]["id"].as_i64().unwrap();
+    let theirs_id = scratch.history("j")[0]["id"].as_i64().unwrap();
+
+    let (code, out, err) = in_dir(&mine, &["logs", "--failed"]);
+    assert_eq!((code, out.as_str()), (Some(0), "mine\n"), "{err}");
+    let header = format!("run {mine_id} k in mine, exit 3, ");
+    assert!(err.starts_with(&header), "{err:?}");
+    // `YYYY-MM-DD HH:MM`, local time, and nothing else on stderr.
+    assert_eq!(
+        err.len(),
+        header.len() + "2026-11-17 20:22\n".len(),
+        "{err:?}"
+    );
+
+    let (code, out, err) = in_dir(&mine, &["logs", "--failed", "--all"]);
+    assert_eq!((code, out.as_str()), (Some(0), "theirs\n"), "{err}");
+    assert!(
+        err.starts_with(&format!("run {theirs_id} j in theirs, exit 4, ")),
+        "{err:?}"
+    );
+
+    let (code, out, err) = in_dir(&clean, &["logs", "--failed"]);
+    assert_eq!((code, out.as_str()), (Some(1), ""));
+    assert_eq!(
+        err,
+        "taskslash: no failed run in clean; taskslash logs --failed --all searches the whole \
+         machine\n"
+    );
+}
+
+#[test]
+fn an_ended_jobs_log_is_found_by_its_number_until_the_daemon_restarts() {
+    let scratch = Scratch::new(None);
+    {
+        let _daemon = scratch.daemon(&[]);
+        scratch.run(&["run", "--name", "k", "--", "sh", "-c", "echo first; exit 2"]);
+        scratch.run(&["run", "--name", "k", "--", "sh", "-c", "echo second"]);
+        let ids: Vec<i64> = scratch
+            .history("k")
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
+        for (job, id, log, exit) in [(1, ids[1], "first\n", 2), (2, ids[0], "second\n", 0)] {
+            let out = scratch.run(&["logs", &job.to_string()]);
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert_eq!(text(&out.stdout), log);
+            let header = format!("run {id} k in ");
+            let err = text(&out.stderr);
+            assert!(err.starts_with(&header), "{err:?}");
+            assert!(err.contains(&format!(", exit {exit}, ")), "{err:?}");
+        }
+    }
+    // A restarted daemon has forgotten them, and says where to look instead.
+    let _daemon = scratch.daemon(&[]);
+    let out = scratch.run(&["logs", "1"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "taskslash: no job 1 (the daemon restarted or forgot it); find the run with taskslash \
+         history <key>, then taskslash logs --run <id>\n"
+    );
 }
 
 /// The running jobs' numbers, from `status --json`.
@@ -411,6 +530,13 @@ fn logs_follows_a_running_job_until_it_ends() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+    // Its header says it runs, and since when.
+    let err = text(&scratch.run(&["logs", &n.to_string()]).stderr);
+    let dir = scratch.dir.file_name().unwrap().to_str().unwrap();
+    assert!(
+        err.starts_with(&format!("job {n} sh -c in {dir}, running since ")),
+        "{err:?}"
+    );
     let mut follow = scratch
         .command(&["logs", &n.to_string(), "-f"])
         .stdout(Stdio::piped())
@@ -430,9 +556,11 @@ fn logs_follows_a_running_job_until_it_ends() {
     assert_eq!(follow.wait().unwrap().code(), Some(0));
     assert_eq!(text(&seen), "one\ntwo\n");
     assert_eq!(job.wait().unwrap().code(), Some(0));
+    // Ended, it is still found by its number, now as its recorded run.
     let after = scratch.run(&["logs", &n.to_string()]);
-    assert_eq!(after.status.code(), Some(1));
-    assert_eq!(text(&after.stderr), format!("taskslash: no job {n}\n"));
+    assert_eq!(after.status.code(), Some(0), "{after:?}");
+    assert_eq!(text(&after.stdout), "one\ntwo\n");
+    assert!(text(&after.stderr).starts_with("run "), "{after:?}");
 }
 
 #[test]

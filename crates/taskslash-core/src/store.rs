@@ -5,7 +5,7 @@ use crate::estimate::RunCost;
 use crate::measure::Cost;
 use crate::protocol::{Class, KeySummary, Kind, Launch, Run};
 use rusqlite::types::Type;
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, Row, named_params, params};
 use std::env;
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
@@ -76,6 +76,12 @@ pub struct Finished<'a> {
 const RUN_COLUMNS: &str = "id, key, kind, argv, cwd, launch, started_at, wall_ms, cpu_usec,
     peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code, machine_cpu_some, machine_mem_some,
     machine_io_some, class, submitter, cached, moon_hash, log_path";
+
+/// A run's submitter is `:within`, or ends in `/<:within>`, or `:within` is null:
+/// [`submitted_from`](crate::protocol::submitted_from) in SQL.
+const WITHIN: &str = "(:within IS NULL OR submitter = :within
+    OR (length(submitter) > length(:within)
+        AND substr(submitter, length(submitter) - length(:within)) = '/' || :within))";
 
 pub struct Store {
     conn: Connection,
@@ -199,16 +205,16 @@ impl Store {
         let mut statement = self
             .conn
             .prepare(&format!(
-                "SELECT {RUN_COLUMNS} FROM runs WHERE key = ?1
-                    AND (?3 IS NULL OR submitter = ?3
-                        OR (length(submitter) > length(?3)
-                            AND substr(submitter, length(submitter) - length(?3)) = '/' || ?3))
-                 ORDER BY started_at DESC, id DESC LIMIT ?2"
+                "SELECT {RUN_COLUMNS} FROM runs WHERE key = :key AND {WITHIN}
+                 ORDER BY started_at DESC, id DESC LIMIT :limit"
             ))
             .map_err(sql)?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         statement
-            .query_map(params![key, limit, within], from_row)
+            .query_map(
+                named_params! {":key": key, ":limit": limit, ":within": within},
+                from_row,
+            )
             .map_err(sql)?
             .collect::<Result<_, _>>()
             .map_err(sql)
@@ -262,16 +268,22 @@ impl Store {
         )
     }
 
-    /// The newest run, of `key` when given, whose exit code is set and not 0. A run whose client
-    /// went away has no exit code and does not count.
-    pub fn last_failed(&self, key: Option<&str>) -> Result<Option<Run>, Error> {
+    /// The newest run, of `key` when given, whose exit code is set and not 0; with `within`, only
+    /// the runs submitted from there, matched as `history` matches it. A run whose client went
+    /// away has no exit code and does not count.
+    pub fn last_failed(
+        &self,
+        key: Option<&str>,
+        within: Option<&str>,
+    ) -> Result<Option<Run>, Error> {
         self.one(
             &format!(
                 "SELECT {RUN_COLUMNS} FROM runs
-                 WHERE exit_code IS NOT NULL AND exit_code != 0 AND (?1 IS NULL OR key = ?1)
+                 WHERE exit_code IS NOT NULL AND exit_code != 0
+                    AND (:key IS NULL OR key = :key) AND {WITHIN}
                  ORDER BY started_at DESC, id DESC LIMIT 1"
             ),
-            params![key],
+            named_params! {":key": key, ":within": within},
         )
     }
 

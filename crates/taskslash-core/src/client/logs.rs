@@ -1,8 +1,9 @@
-//! `taskslash logs`: prints a job's or a run's log, and follows a running job's to its end.
+//! `taskslash logs`: prints a job's or a run's log, and follows a running job's to its end. A
+//! header on stderr says first whose log it is, so the log on stdout stays as the command wrote it.
 
 use super::Connection;
 use crate::Error;
-use crate::protocol::{ClientMessage, DaemonMessage, JobState, LogFound, LogSelect};
+use crate::protocol::{ClientMessage, DaemonMessage, JobState, LogFound, LogSelect, worktree};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -12,14 +13,16 @@ use std::time::Duration;
 /// How often `-f` looks for more of the log and whether its job has ended.
 const FOLLOW_EVERY: Duration = Duration::from_millis(200);
 
-/// Writes the log `select` picks to `out`, unchanged. With `follow`, a running job's log is
-/// followed until the job ends. An `Err` (exit 1) when nothing matches, the job has not started,
-/// the run predates logs, or retention deleted its log.
+/// Writes the log `select` picks to `out`, unchanged, after a header on `err` naming the run or
+/// job, its key, worktree, exit and time. With `follow`, a running job's log is followed until the
+/// job ends. An `Err` (exit 1) when nothing matches, the job has not started or never ran, the run
+/// predates logs, or retention deleted its log.
 pub fn logs(
     socket: &Path,
     select: &LogSelect,
     follow: bool,
     out: &mut impl Write,
+    err: &mut impl Write,
 ) -> Result<(), Error> {
     let mut daemon = Connection::open(socket)?;
     let found = match daemon.ask(&ClientMessage::Log {
@@ -29,20 +32,33 @@ pub fn logs(
         other => return Err(Error::new(format!("unexpected reply {other:?}"))),
     };
     let Some(found) = found else {
-        return Err(Error::new(match select {
-            LogSelect::Job { job } => format!("no job {job}"),
-            LogSelect::Run { run } => format!("no run {run}"),
-            LogSelect::Last { key } => format!("no run of {key}"),
-            LogSelect::Failed { key: None } => "no failed run".to_owned(),
-            LogSelect::Failed { key: Some(key) } => format!("no failed run of {key}"),
-        }));
+        return Err(Error::new(nothing(select)));
     };
-    let written = match found {
+    if let LogSelect::Failed {
+        within: Some(_), ..
+    } = select
+        && found.submitter.is_none()
+    {
+        let _ = writeln!(
+            err,
+            "(this daemon is older: searched the whole machine; reinstall it)"
+        );
+    }
+    if found.never_ran {
+        return Err(Error::new(format!(
+            "job {} never ran (it ended before it started), so it has no log",
+            found.job.unwrap_or_default()
+        )));
+    }
+    let written = match &found {
         LogFound {
             job: Some(job),
             log_path: Some(path),
             ..
-        } => running(socket, job, Path::new(&path), follow, out),
+        } => {
+            let _ = writeln!(err, "{}", header(&found, local_time));
+            running(socket, *job, Path::new(path), follow, out)
+        }
         LogFound {
             job: Some(job),
             log_path: None,
@@ -64,10 +80,11 @@ pub fn logs(
             ..
         } => {
             let run = run.unwrap_or_default();
-            let mut file = File::open(&path).map_err(|e| match e.kind() {
+            let mut file = File::open(path).map_err(|e| match e.kind() {
                 io::ErrorKind::NotFound => Error::new(format!("the log of run {run} has expired")),
                 _ => Error::new(format!("cannot read {path}: {e}")),
             })?;
+            let _ = writeln!(err, "{}", header(&found, local_time));
             io::copy(&mut file, out).and_then(|_| out.flush())
         }
     };
@@ -77,6 +94,118 @@ pub fn logs(
         Err(e) => Err(Error::new(format!("cannot write the log: {e}"))),
         Ok(()) => Ok(()),
     }
+}
+
+/// What to say when the daemon found nothing for `select`, and what to try next.
+fn nothing(select: &LogSelect) -> String {
+    match select {
+        LogSelect::Job { job } => format!(
+            "no job {job} (the daemon restarted or forgot it); find the run with taskslash \
+             history <key>, then taskslash logs --run <id>"
+        ),
+        LogSelect::Run { run } => format!("no run {run}"),
+        LogSelect::Last { key } => format!("no run of {key}"),
+        LogSelect::Failed { key, within } => {
+            let of = key.as_ref().map(|k| format!(" of {k}")).unwrap_or_default();
+            match within {
+                None => format!("no failed run{of}"),
+                Some(within) => {
+                    let again = key.as_ref().map(|k| format!(" {k}")).unwrap_or_default();
+                    format!(
+                        "no failed run{of} in {}; taskslash logs --failed{again} --all searches \
+                         the whole machine",
+                        worktree(within)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// The line `logs` prints on stderr before a log: `run 3140 <key> in <worktree>, exit 2,
+/// 2026-11-17 20:22` for a recorded run, `job 12 <key> in <worktree>, running since 20:22` for a
+/// running job. What an older daemon left out is left out. `local` turns an RFC 3339 UTC time into
+/// the local date and time of day.
+fn header(found: &LogFound, local: impl Fn(&str) -> Option<(String, String)>) -> String {
+    let mut line = match (found.job, found.run) {
+        (Some(job), _) => format!("job {job}"),
+        (None, run) => format!("run {}", run.unwrap_or_default()),
+    };
+    if let Some(key) = &found.key {
+        line.push_str(&format!(" {key}"));
+    }
+    if let Some(submitter) = &found.submitter {
+        line.push_str(&format!(" in {}", worktree(submitter)));
+    }
+    let when = found.started_at.as_deref().and_then(local);
+    if found.job.is_some() {
+        if found.key.is_some() {
+            line.push_str(", running");
+            if let Some((_, time)) = when {
+                line.push_str(&format!(" since {time}"));
+            }
+        }
+    } else if found.submitter.is_some() {
+        match found.exit_code {
+            Some(code) => line.push_str(&format!(", exit {code}")),
+            None => line.push_str(", no exit code"),
+        }
+        if let Some((date, time)) = when {
+            line.push_str(&format!(", {date} {time}"));
+        }
+    }
+    line
+}
+
+/// `at`, RFC 3339 in UTC (`2026-11-17T18:22:05.123Z`), as the local date (`2026-11-17`) and time
+/// of day (`20:22`). `None` when it does not parse.
+fn local_time(at: &str) -> Option<(String, String)> {
+    let secs = libc::time_t::try_from(epoch_secs(at)?).ok()?;
+    // SAFETY: `tzset` reads TZ and the zone files; `localtime_r` only writes `tm`, which outlives it.
+    let tm = unsafe {
+        tzset();
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&secs, &mut tm).is_null() {
+            return None;
+        }
+        tm
+    };
+    Some((
+        format!(
+            "{:04}-{:02}-{:02}",
+            i64::from(tm.tm_year) + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday
+        ),
+        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min),
+    ))
+}
+
+unsafe extern "C" {
+    fn tzset();
+}
+
+/// Seconds since the epoch of `at`, RFC 3339 in UTC as the daemon writes it.
+fn epoch_secs(at: &str) -> Option<i64> {
+    let at = at.strip_suffix('Z').unwrap_or(at);
+    let (date, time) = at.split_once('T')?;
+    let mut date = date.splitn(3, '-').map(str::parse::<i64>);
+    let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
+    let time = time.split('.').next()?;
+    let mut time = time.splitn(3, ':').map(str::parse::<i64>);
+    let (hour, minute, second) = (time.next()?.ok()?, time.next()?.ok()?, time.next()?.ok()?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Days since 1970-01-01 from a civil date (Howard Hinnant's algorithm), as `rfc3339` inverts.
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400);
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 /// Writes what job `job`'s log at `path` holds; with `follow`, then what is added until the job
@@ -125,4 +254,114 @@ fn holds(socket: &Path, job: u64) -> bool {
             ..
         }) | Err(_)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogFound, LogSelect, epoch_secs, header, local_time, logs};
+    use crate::procfs::rfc3339;
+    use std::fs;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    /// A fixed "local" time, so the header does not depend on the machine's zone.
+    fn fixed(_: &str) -> Option<(String, String)> {
+        Some(("2026-11-17".to_owned(), "20:22".to_owned()))
+    }
+
+    #[test]
+    fn a_runs_header_names_it_its_key_worktree_exit_and_time() {
+        let run = LogFound {
+            run: Some(3140),
+            log_path: Some("/l".into()),
+            key: Some("taskslash/test".into()),
+            submitter: Some("/home/j/dev/taskslash-wt".into()),
+            exit_code: Some(2),
+            started_at: Some("2026-11-17T18:22:00.000Z".into()),
+            ..LogFound::default()
+        };
+        assert_eq!(
+            header(&run, fixed),
+            "run 3140 taskslash/test in taskslash-wt, exit 2, 2026-11-17 20:22"
+        );
+        let gone = LogFound {
+            exit_code: None,
+            ..run
+        };
+        assert!(header(&gone, fixed).contains(", no exit code, "));
+    }
+
+    #[test]
+    fn a_running_jobs_header_says_since_when() {
+        let job = LogFound {
+            job: Some(12),
+            log_path: Some("/l".into()),
+            key: Some("k".into()),
+            submitter: Some("/w/wt".into()),
+            started_at: Some("2026-11-17T18:22:00.000Z".into()),
+            ..LogFound::default()
+        };
+        assert_eq!(header(&job, fixed), "job 12 k in wt, running since 20:22");
+    }
+
+    #[test]
+    fn an_older_daemons_reply_gives_only_the_number() {
+        let job = LogFound {
+            job: Some(12),
+            log_path: Some("/l".into()),
+            ..LogFound::default()
+        };
+        assert_eq!(header(&job, fixed), "job 12");
+    }
+
+    #[test]
+    fn the_daemons_times_parse_back_to_the_second() {
+        for secs in [0, 951_782_400, 1_763_403_725, 4_102_444_800] {
+            let at = UNIX_EPOCH + Duration::from_millis(secs * 1000 + 464);
+            assert_eq!(epoch_secs(&rfc3339(at)), Some(secs as i64), "{secs}");
+        }
+        assert_eq!(epoch_secs("yesterday"), None);
+        assert_eq!(epoch_secs("2026-13-01T00:00:00Z"), None);
+        let (date, time) = local_time("2026-11-17T18:22:00.000Z").unwrap();
+        assert_eq!((date.len(), time.len()), (10, 5), "{date} {time}");
+    }
+
+    #[test]
+    fn an_older_daemon_searched_the_whole_machine_and_the_client_says_so() {
+        let dir = std::env::temp_dir().join(format!("tklog-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("d.sock");
+        let log = dir.join("run.log");
+        fs::write(&log, "boom\n").unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let reply = format!(
+            "{{\"type\":\"log\",\"found\":{{\"job\":null,\"run\":3140,\"log_path\":{:?}}}}}\n",
+            log.to_str().unwrap()
+        );
+        let daemon = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let mut out = stream;
+            out.write_all(reply.as_bytes()).unwrap();
+            line
+        });
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let select = LogSelect::Failed {
+            key: None,
+            within: Some("/w/mine".into()),
+        };
+        logs(&socket, &select, false, &mut out, &mut err).unwrap();
+        let asked = daemon.join().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(asked.contains("\"within\":\"/w/mine\""), "{asked}");
+        assert_eq!(out, b"boom\n");
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "(this daemon is older: searched the whole machine; reinstall it)\nrun 3140\n"
+        );
+    }
 }

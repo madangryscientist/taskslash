@@ -240,15 +240,15 @@ impl Scheduler {
         }
     }
 
-    /// The log of job `id` and whether it runs (else it waits); `None` when it is not held.
-    pub fn log(&self, id: u64) -> Option<(PathBuf, bool)> {
+    /// Job `id` and when it started, `None` while it waits; `None` when it is not held.
+    pub fn held(&self, id: u64) -> Option<(&Job, Option<SystemTime>)> {
         if let Some(running) = self.running.get(&id) {
-            return Some((running.job.log.clone(), true));
+            return Some((&running.job, Some(running.started_at)));
         }
         self.queue
             .iter()
             .find(|w| w.job.id == id)
-            .map(|w| (w.job.log.clone(), false))
+            .map(|w| (&w.job, None))
     }
 
     /// The running job of `key` that started last: its number and start.

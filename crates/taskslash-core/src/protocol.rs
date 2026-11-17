@@ -153,23 +153,46 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum LogSelect {
-    /// A job the daemon holds, by its number.
+    /// A job by its number: one the daemon holds, or one that ended since it started (it remembers
+    /// the newest 1000 of those).
     Job { job: u64 },
     /// A recorded run, by its id.
     Run { run: i64 },
     /// The newest run of `key`, running or not.
     Last { key: String },
-    /// The newest recorded run, of `key` when given, whose exit code is set and not 0.
-    Failed { key: Option<String> },
+    /// The newest recorded run, of `key` when given, whose exit code is set and not 0. With
+    /// `within`, only the runs submitted from there (as `history --where` matches it). A daemon
+    /// older than `within` ignores it and searches every run.
+    Failed {
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        within: Option<String>,
+    },
 }
 
 /// What a `log` query found: a running or waiting job (`job`), or a recorded run (`run`), and its
 /// log file. `log_path` is `None` for a waiting job and for a run recorded before capture.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `never_ran` is a job that ended before it started, so it has neither a run nor a log.
+///
+/// The rest says whose it is, for the header `logs` prints. A daemon older than these fields
+/// leaves them out, and `submitter` missing is how the client tells.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogFound {
     pub job: Option<u64>,
     pub run: Option<i64>,
     pub log_path: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub never_ran: bool,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub submitter: Option<String>,
+    /// A recorded run's exit code; `None` when its client went away, and for a running job.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// RFC 3339, UTC: when the run or the running job started.
+    #[serde(default)]
+    pub started_at: Option<String>,
 }
 
 /// How the client runs a job's command.

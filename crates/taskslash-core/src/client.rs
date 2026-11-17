@@ -376,8 +376,9 @@ impl Subscription {
 }
 
 /// Who submits from `cwd`: the nearest ancestor of it, itself first, with a `.git` entry (a
-/// directory in a clone, a file in a worktree), else `cwd`.
-fn submitter(cwd: &Path) -> &Path {
+/// directory in a clone, a file in a worktree), else `cwd`. `taskslash run` sends it, and
+/// `taskslash logs --failed` searches its runs.
+pub fn submitter(cwd: &Path) -> &Path {
     cwd.ancestors()
         .find(|dir| dir.join(".git").symlink_metadata().is_ok())
         .unwrap_or(cwd)

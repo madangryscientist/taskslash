@@ -1,6 +1,7 @@
 //! One job's connection: queued, started, measured and recorded.
 
 use super::Daemon;
+use super::ended::Ended;
 use crate::admission::{Reason, ordinal};
 use crate::estimate::{Source, estimate};
 use crate::logs;
@@ -141,7 +142,16 @@ impl Daemon {
                     }
                     Err(RecvTimeoutError::Timeout) if hung_up(writer) => {
                         // Not on the queue any more means it started meanwhile: run it as dropped.
-                        if self.scheduler().leave(id) {
+                        // Remembered while the scheduler is locked, as `finish` below does.
+                        let left = {
+                            let mut scheduler = self.scheduler();
+                            let left = scheduler.leave(id);
+                            if left {
+                                self.job_ended(id, Ended::NoRun);
+                            }
+                            left
+                        };
+                        if left {
                             eprintln!("job {id} left the queue");
                             self.never_started(id, &key);
                             return;
@@ -191,7 +201,16 @@ impl Daemon {
             }) if job == id => (Some(code), cached, moon_hash),
             _ => (None, None, None),
         };
-        let Some(running) = self.scheduler().finish(id) else {
+        // Remembered as ending while the scheduler is still locked, so `logs <n>` always finds it.
+        let finished = {
+            let mut scheduler = self.scheduler();
+            let finished = scheduler.finish(id);
+            if finished.is_some() {
+                self.job_ended(id, Ended::Recording);
+            }
+            finished
+        };
+        let Some(running) = finished else {
             self.never_started(id, &key);
             return;
         };
@@ -219,6 +238,12 @@ impl Daemon {
             log_path: Some(&log),
         };
         let recorded = self.store().record(&finished);
+        self.job_ended(
+            id,
+            recorded
+                .as_ref()
+                .map_or(Ended::Unrecorded, |&run| Ended::Run(run)),
+        );
         self.events.publish(JobEvent::Finished {
             job: id,
             key: key.clone(),
@@ -246,6 +271,7 @@ impl Daemon {
 impl Daemon {
     /// The `finished` of a job that leaves before it runs, so every `queued` has one.
     fn never_started(&self, id: u64, key: &str) {
+        self.job_ended(id, Ended::NoRun);
         self.events.publish(JobEvent::Finished {
             job: id,
             key: key.to_owned(),

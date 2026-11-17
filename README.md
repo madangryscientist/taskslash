@@ -34,10 +34,11 @@ taskslash history gate --json             # the same, as {"estimate": ..., "runs
 taskslash status                          # is this machine busy, and with what
 taskslash status --json                   # the same, as one line of JSON
 taskslash top                             # the machine, the jobs and their output, live
-taskslash logs 7                          # what running job 7 has printed so far
+taskslash logs 7                          # what job 7 has printed so far, running or ended
 taskslash logs 7 -f                       # the same, followed until it ends
 taskslash logs --last gate                # the newest run of "gate", running or not
-taskslash logs --failed                   # the newest run that failed
+taskslash logs --failed                   # the newest run that failed in this worktree
+taskslash logs --failed --all             # the newest run that failed on the whole machine
 taskslash events                          # one JSON line per job queued, started, finished
 taskslash plugins                         # the plugins on PATH (below)
 ```
@@ -78,20 +79,44 @@ else in the directory) of jobs that ended over 7 days ago, then the oldest ended
 deleted. `TASKSLASH_LOG_DAYS` (days, fractions allowed) and `TASKSLASH_LOG_MIB` change the limits.
 The run's row keeps the path of a deleted log.
 
-**Reading a log.** `taskslash logs` prints one log to stdout, unchanged:
+**Reading a log.** `taskslash logs` prints one log to stdout, unchanged, after one line on stderr
+that says whose it is, so the log itself stays pipeable:
+
+```
+run 3140 taskslash/test in taskslash-wt, exit 2, 2026-11-17 20:22
+job 12 taskslash/test in taskslash-wt, running since 20:22
+```
+
+The worktree is the last part of the submitter's path, as `top` and `history` show it, and the time
+is local.
 
 | Command | Picks |
 | --- | --- |
-| `taskslash logs <job>` | the running job with that number, as `taskslash status` shows it |
+| `taskslash logs <job>` | the job with that number, as `taskslash status` shows it: running, or ended since the daemon started (it remembers the newest 1000; a restart forgets them) |
 | `taskslash logs --run <id>` | the recorded run with that id, as `taskslash history` shows it |
 | `taskslash logs --last <key>` | the newest run of the key, running or not |
-| `taskslash logs --failed [<key>]` | the newest run (of the key) with an exit code that is not 0; a signal's 128+N counts, a run with no exit code (its client went away) does not |
+| `taskslash logs --failed [<key>]` | the newest run (of the key) submitted from this worktree with an exit code that is not 0; a signal's 128+N counts, a run with no exit code (its client went away) does not |
+| `taskslash logs --failed [<key>] --all` | the same, from every worktree on the machine |
+
+This worktree is the one `taskslash run` reports from here: the nearest directory above the current
+one with a `.git`. On a shared machine the newest failure is usually someone else's, so `--failed`
+looks only at yours until `--all` widens it.
 
 `-f` follows a running job's log until the job ends, then exits. It exits 0 when it printed the log,
-and 1 with one line on stderr when there is no such job or run (`taskslash: no job 7`,
-`taskslash: no run of gate`), when the run was recorded before logs were kept
-(`taskslash: run 12 has no log`), or when retention deleted it
-(`taskslash: the log of run 12 has expired`); 2 on a usage error.
+and 1 with one line on stderr when there is nothing to print:
+
+| Case | Message |
+| --- | --- |
+| a job number the daemon does not know | `taskslash: no job 7 (the daemon restarted or forgot it); find the run with taskslash history <key>, then taskslash logs --run <id>` |
+| a job that ended before it started | `taskslash: job 7 never ran (it ended before it started), so it has no log` |
+| no failed run in this worktree | `taskslash: no failed run in shop; taskslash logs --failed --all searches the whole machine` |
+| no run of the key | `taskslash: no run of gate` |
+| a run recorded before logs were kept | `taskslash: run 12 has no log` |
+| a log retention deleted | `taskslash: the log of run 12 has expired` |
+
+It exits 2 on a usage error (`--all` without `--failed` is one). A daemon older than this client
+answers with less: the header names only the run or job, and `--failed` searches the whole machine
+and says so on stderr (`(this daemon is older: searched the whole machine; reinstall it)`).
 
 ### moon targets
 
