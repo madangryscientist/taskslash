@@ -56,14 +56,25 @@ fn a_failure_skips_only_what_depends_on_it() {
 }
 
 #[test]
-fn a_summary_line_says_how_long_and_whether_cached() {
+fn a_summary_line_says_how_long_whether_cached_and_its_key() {
     let mut e = end(State::Pass);
-    assert_eq!(summary_line("a:test", &e), "a:test pass 1.2s\n");
-    e.cached = true;
-    assert_eq!(summary_line("a:test", &e), "a:test pass 1.2s cached\n");
     assert_eq!(
-        summary_line("b:lint", &end(State::Skipped)),
-        "b:lint skipped -\n"
+        summary_line("a:test", "shop/a:test", &e),
+        "a:test pass 1.2s [shop/a:test]\n"
+    );
+    e.cached = true;
+    assert_eq!(
+        summary_line("a:test", "shop/a:test", &e),
+        "a:test pass 1.2s cached [shop/a:test]\n"
+    );
+    assert_eq!(
+        summary_line("b:lint", "shop/b:lint", &end(State::Skipped)),
+        "b:lint skipped - [shop/b:lint]\n",
+        "a skipped target never ran, so it has no log"
+    );
+    assert_eq!(
+        summary_line("b:typecheck", "shop/b:typecheck", &end(State::Fail)),
+        "b:typecheck fail 1.2s [shop/b:typecheck]\n  log: taskslash logs --last shop/b:typecheck\n"
     );
 }
 

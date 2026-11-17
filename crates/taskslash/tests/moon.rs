@@ -14,17 +14,25 @@ mod fixture;
 
 use fixture::{BIN, Scratch};
 
-/// The summary at the end of `taskslash moon`'s stdout: target to (state, cached).
+/// The summary at the end of `taskslash moon`'s stdout: target to (state, cached). Each line ends
+/// with the target's key in brackets (the fixture repository is named `fixture`); the indented
+/// `log:` line after a failure is skipped.
 fn summary(out: &Output) -> BTreeMap<String, (String, bool)> {
     let text = String::from_utf8_lossy(&out.stdout);
     let block = text.rsplit("\n\n").next().unwrap_or_default();
     block
         .lines()
+        .filter(|line| !line.starts_with("  log: "))
         .map(|line| {
             let words: Vec<&str> = line.split_whitespace().collect();
             assert!(
-                (3..=4).contains(&words.len()),
+                (4..=5).contains(&words.len()),
                 "a summary line: {line:?}\n{text}"
+            );
+            assert_eq!(
+                words.last().copied(),
+                Some(format!("[fixture/{}]", words[0]).as_str()),
+                "the key ends the line: {line:?}"
             );
             (
                 words[0].to_owned(),
@@ -115,6 +123,24 @@ fn a_failure_skips_what_depends_on_it() {
         states(&summary(&out)),
         BTreeMap::from([("b:lint", "skipped"), ("b:typecheck", "fail")])
     );
+    // The failure is followed by the command that prints its log, and that command works; the
+    // skipped target never ran, so it has none.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let log = "  log: taskslash logs --last fixture/b:typecheck\n";
+    assert!(
+        text.contains(&format!("[fixture/b:typecheck]\n{log}")),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("b:lint skipped - [fixture/b:lint]\n"),
+        "{text}"
+    );
+    assert_eq!(text.matches("  log: ").count(), 1, "{text}");
+    let logs = daemon
+        .scratch
+        .taskslash(&["logs", "--last", "fixture/b:typecheck"]);
+    assert_eq!(logs.status.code(), Some(0), "{logs:?}");
+    assert!(!logs.stdout.is_empty(), "{logs:?}");
 }
 
 /// moon 2.6.5 stops at its first failure, so on `:typecheck :test` it finishes only some targets:
@@ -204,7 +230,11 @@ fn outside_a_workspace_or_with_a_bad_target_is_a_usage_error() {
     let daemon = Scratch::new().daemon();
     let out = daemon.scratch.taskslash(&["moon", "a:nope"]);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("a:nope matches no task"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("a:nope matches no task\n  tasks in a: gen, test, typecheck\n"),
+        "{err}"
+    );
     let out = daemon
         .scratch
         .command(BIN, &["moon", ":test"])

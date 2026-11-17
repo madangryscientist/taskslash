@@ -35,6 +35,7 @@ mod store;
 
 pub use client::{Demand, Subscription, events, history, keys, logs, run, status, subscribe, why};
 pub use daemon::serve;
+pub use moon::target_key;
 pub use moon_run::moon;
 pub use socket::socket_path;
 pub use store::{HISTORY_LIMIT, db_path};

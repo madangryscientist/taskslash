@@ -75,7 +75,8 @@ enum Commands {
     /// Each target and every target it depends on (requested or not) runs exactly once, after the
     /// ones it depends on have passed, as `moon run <target> --upstream none`, named
     /// `<repo>/<target>`. A target whose dependency failed is skipped. Ends with one line per
-    /// target: pass, fail or skipped, its wall time, and `cached` when moon replayed it from cache.
+    /// target: pass, fail or skipped, its wall time, `cached` when moon replayed it from cache, and
+    /// its key in brackets; a failed target is followed by `  log: taskslash logs --last <key>`.
     /// Exits 0 when every target passed, else 1; 2 when there is no moon workspace at or above the
     /// current directory or a target is wrong.
     Moon {
@@ -95,7 +96,9 @@ enum Commands {
     /// With no key, one line per key that has runs, the most recently run first: when it last ran,
     /// how many runs, the last exit code, the worktree it last ran in, and the key. With a key, the
     /// estimate, then its newest runs (20 unless `--limit`), each with the worktree it ran in.
-    /// A key with no runs exits 1, naming up to five known keys like it.
+    /// A key with no runs exits 1, naming up to five known keys like it. Inside a moon workspace, a
+    /// key with no runs that looks like `<project>:<task>` is tried as `<repo>/<project>:<task>`, and
+    /// when that has runs, `key: <repo>/<project>:<task>` is printed first on stderr.
     ///
     /// Each figure of the estimate comes from the key's history, or from its kind's default when
     /// no run feeds it (the kind is the newest run's). CPU and duration come from calm runs only:
@@ -294,10 +297,21 @@ fn history(
                 keys_text(&keys)
             }
         }
-        Some(key) => {
-            let (estimate, runs) = taskslash_core::history(socket, key, limit, within)?;
+        Some(typed) => {
+            let (mut estimate, mut runs) = taskslash_core::history(socket, typed, limit, within)?;
+            let resolved = runs
+                .is_empty()
+                .then(|| std::env::current_dir().ok())
+                .flatten()
+                .and_then(|cwd| taskslash_core::target_key(&cwd, typed));
+            if let Some(resolved) = &resolved {
+                (estimate, runs) = taskslash_core::history(socket, resolved, limit, within)?;
+                if !runs.is_empty() {
+                    eprintln!("key: {resolved}");
+                }
+            }
             if runs.is_empty() {
-                return Err(no_runs(socket, key, within)?);
+                return Err(no_runs(socket, typed, resolved.as_deref(), within)?);
             }
             if json {
                 taskslash_core::protocol::history_json(&estimate, &runs)
@@ -311,20 +325,31 @@ fn history(
     Ok(0)
 }
 
-/// The error for a key with no runs: in `within` when the key has runs elsewhere, else with up to
-/// five known keys like it.
-fn no_runs(socket: &std::path::Path, key: &str, within: Option<&str>) -> Result<Error, Error> {
+/// The error for a key with no runs (nor its moon form `resolved`, when it has one): in `within`
+/// when the key has runs elsewhere, else with up to five known keys like it.
+fn no_runs(
+    socket: &std::path::Path,
+    key: &str,
+    resolved: Option<&str>,
+    within: Option<&str>,
+) -> Result<Error, Error> {
     let keys: Vec<String> = taskslash_core::keys(socket)?
         .into_iter()
         .map(|k| k.key)
         .collect();
     if let Some(within) = within
-        && keys.iter().any(|k| k == key)
+        && let Some(known) = [Some(key), resolved]
+            .into_iter()
+            .flatten()
+            .find(|&candidate| keys.iter().any(|k| k == candidate))
     {
-        return Ok(Error::new(format!("no runs of \"{key}\" in {within}")));
+        return Ok(Error::new(format!("no runs of \"{known}\" in {within}")));
     }
     let like = taskslash_core::protocol::suggest(key, &keys);
     let mut message = format!("no runs of \"{key}\"");
+    if let Some(resolved) = resolved {
+        message.push_str(&format!(" nor of \"{resolved}\""));
+    }
     if like.is_empty() {
         message.push_str("\n  'taskslash history' with no key lists the keys");
     } else {

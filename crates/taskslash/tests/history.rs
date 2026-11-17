@@ -394,6 +394,60 @@ fn an_unknown_key_exits_1_naming_keys_like_it() {
 }
 
 #[test]
+fn a_moon_target_inside_a_workspace_finds_its_repos_key() {
+    let daemon = Scratch::new().daemon();
+    let shop = daemon.scratch.dir.join("shop");
+    fs::create_dir_all(shop.join(".moon")).unwrap();
+    fs::write(shop.join(".moon/workspace.yml"), "projects: {}\n").unwrap();
+    fs::create_dir_all(shop.join("apps/cli")).unwrap();
+    ok(&daemon
+        .scratch
+        .run(&["run", "--name", "shop/cli:test", "--", "true"]));
+    let in_dir = |dir: &Path, args: &[&str]| {
+        daemon
+            .scratch
+            .command(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+    };
+
+    let out = in_dir(&shop.join("apps/cli"), &["history", "cli:test", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "key: shop/cli:test\n",
+        "the key used, on stderr"
+    );
+    let history: Value = serde_json::from_slice(&out.stdout).expect("stdout is only the JSON");
+    assert_eq!(history["runs"].as_array().unwrap().len(), 1, "{history}");
+
+    // A key that has runs as typed is never second-guessed: no `key:` line.
+    let out = in_dir(&shop, &["history", "shop/cli:test"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+
+    // Outside a workspace, the typed key is all there is.
+    let out = daemon.scratch.run(&["history", "cli:test"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with("taskslash: no runs of \"cli:test\"\n"),
+        "{err}"
+    );
+    assert!(err.contains("    shop/cli:test\n"), "{err}");
+
+    // Inside, a target with runs under neither form names both.
+    let out = in_dir(&shop, &["history", "web:test"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with("taskslash: no runs of \"web:test\" nor of \"shop/web:test\"\n"),
+        "{err}"
+    );
+}
+
+#[test]
 fn limit_and_where_filter_the_runs() {
     let daemon = Scratch::new().daemon();
     let other = daemon.scratch.dir.join("other");

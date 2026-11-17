@@ -28,6 +28,7 @@ taskslash history                         # every key with runs, the most recent
 taskslash history gate                    # the estimate of "gate", then what its last 20 runs cost
 taskslash history "bun test"              # a run with no --name is keyed by its first two words
 taskslash history shop/web:test           # a taskslash moon target: <repo>/<project>:<task>
+taskslash history web:test                # the same, typed inside the shop workspace
 taskslash history gate --limit 5 --where shop   # its last 5 runs submitted from the worktree "shop"
 taskslash history gate --json             # the same, as {"estimate": ..., "runs": [...]}
 taskslash status                          # is this machine busy, and with what
@@ -107,7 +108,10 @@ target is its own job, so the daemon's budget decides how many run at once, acro
 It finds the workspace (the first directory from here up with `.moon/workspace.yml`) and its moon
 (`node_modules/.bin/moon` there, else `moon` on `PATH`), and reads `moon query tasks`. A target is
 `:<task>` (that task in every project that has it) or `<project>:<task>`; anything else, or one that
-matches nothing, is a usage error (exit 2). The requested targets and every target they depend on,
+matches nothing, is a usage error (exit 2). One that matches nothing is followed by what exists: the
+projects that have that task (`projects with test: cli, web`, at most 12), or, when only the task is
+wrong, the project's tasks (`tasks in cli: lint, test`). With no moon found, it says to run your
+package manager's install first (exit 1). The requested targets and every target they depend on,
 requested or not, each run **exactly once**, after all their dependencies passed, as
 `moon run <target> --upstream none` (plus `--force` when given), so moon never re-runs a dependency
 TaskSlash already ran. That holds for a task with its cache off too: it runs once, before what needs
@@ -117,13 +121,15 @@ job's output is passed through as moon prints it.
 Each job is named `<repo>/<target>`, where `<repo>` is the repository's name, the same for every
 worktree of it (`shop` for both `shop` and its worktree `shop.feature-x`), so they share one
 history. Its kind is the task's name when that is `test`, `typecheck` or `build`, else `command`.
-It ends with one line per target, in dependency order:
+It ends with one line per target, in dependency order, each ending with the key its run is
+recorded under, and a failed target followed by the command that prints its log:
 
 ```
-a:gen pass 0.1s
-b:test pass 0.1s cached
-b:typecheck fail 0.1s
-b:lint skipped -
+a:gen pass 0.1s [shop/a:gen]
+b:test pass 0.1s cached [shop/b:test]
+b:typecheck fail 0.1s [shop/b:typecheck]
+  log: taskslash logs --last shop/b:typecheck
+b:lint skipped - [shop/b:lint]
 ```
 
 `cached` marks a target moon replayed from its cache. That run is recorded with `cached` set and its
@@ -147,7 +153,9 @@ path), `-` for a value that was not measured, and the worktree each ran in; a ru
 `taskslash run` went away before the command ended has no exit code. With no key it lists every key
 that has runs, the most recently run first, with its run count, last run, last exit code and the
 worktree it last ran in (`--json`: an array). A key with no runs exits 1 and names up to five known
-keys like it on stderr. A client newer than the daemon it talks to says so and asks you to reinstall
+keys like it on stderr. Inside a moon workspace, a key that has no runs and looks like a moon target
+(`<project>:<task>`, no `/`) is tried as `<repo>/<project>:<task>`, the key `taskslash moon` records
+it under; when that has runs they are shown, and `key: <repo>/<project>:<task>` goes first on stderr. A client newer than the daemon it talks to says so and asks you to reinstall
 the daemon.
 
 **Measurement needs a systemd user session.** The daemon checks once at startup whether
