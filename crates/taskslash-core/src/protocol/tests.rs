@@ -22,6 +22,8 @@ fn messages_round_trip_as_tagged_json_lines() {
     };
     let history = ClientMessage::History {
         key: "probe".into(),
+        limit: None,
+        within: None,
     };
     let mut wire = Vec::new();
     send(&mut wire, &submit).unwrap();
@@ -100,4 +102,77 @@ fn a_finished_event_spells_its_unknowns_as_null() {
         serde_json::to_string(&finished).unwrap(),
         "{\"type\":\"finished\",\"job\":1,\"key\":\"k\",\"exit_code\":null,\"wall_ms\":0,\"cached\":null,\"moon_hash\":null,\"run\":null,\"log\":null,\"at\":\"2026-11-17T00:00:00.000Z\"}"
     );
+}
+
+#[test]
+fn an_old_clients_history_parses_and_a_new_one_carries_limit_and_where() {
+    let old: ClientMessage = serde_json::from_str("{\"type\":\"history\",\"key\":\"k\"}").unwrap();
+    assert_eq!(
+        old,
+        ClientMessage::History {
+            key: "k".into(),
+            limit: None,
+            within: None,
+        }
+    );
+    let new = ClientMessage::History {
+        key: "k".into(),
+        limit: Some(3),
+        within: Some("wt".into()),
+    };
+    assert_eq!(
+        serde_json::to_string(&new).unwrap(),
+        "{\"type\":\"history\",\"key\":\"k\",\"limit\":3,\"where\":\"wt\"}"
+    );
+    assert_eq!(
+        serde_json::to_string(&ClientMessage::Keys).unwrap(),
+        "{\"type\":\"keys\"}"
+    );
+}
+
+#[test]
+fn suggestions_are_substring_matches_first_then_the_closest_names() {
+    let keys: Vec<String> = [
+        "shop/web:test",
+        "shop/api:test",
+        "shop/web:build",
+        "bun test",
+        "gate",
+        "gates",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(
+        suggest("WEB", &keys),
+        ["shop/web:test", "shop/web:build"],
+        "case-insensitive substring, in the keys' order"
+    );
+    assert_eq!(
+        suggest("GAET", &keys),
+        ["gate", "gates"],
+        "else closest by Jaro, any case"
+    );
+    let near: Vec<String> = ["gate", "late"].into_iter().map(String::from).collect();
+    assert_eq!(
+        suggest("gat", &near),
+        ["gate"],
+        "no Jaro once a key contains it"
+    );
+    assert_eq!(
+        suggest("shop", &keys),
+        ["shop/web:test", "shop/api:test", "shop/web:build"]
+    );
+    assert!(suggest("zzzzzz", &keys).is_empty());
+    let many: Vec<String> = (0..9).map(|n| format!("job{n}")).collect();
+    assert_eq!(suggest("job", &many).len(), 5, "at most five");
+}
+
+#[test]
+fn where_keeps_a_full_path_or_a_directory_name() {
+    assert!(submitted_from("/dev/shop", "shop"));
+    assert!(submitted_from("/dev/shop", "/dev/shop"));
+    assert!(!submitted_from("/dev/myshop", "shop"));
+    assert!(!submitted_from("/dev/shop", "hop"));
+    assert!(submitted_from("shop", "shop"));
 }

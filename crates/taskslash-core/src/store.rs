@@ -3,7 +3,7 @@
 use crate::Error;
 use crate::estimate::RunCost;
 use crate::measure::Cost;
-use crate::protocol::{Class, Kind, Launch, Run};
+use crate::protocol::{Class, KeySummary, Kind, Launch, Run};
 use rusqlite::types::Type;
 use rusqlite::{Connection, Row, params};
 use std::env;
@@ -12,7 +12,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// How many runs `history` returns.
+/// How many runs `history` returns when not told.
 pub const HISTORY_LIMIT: usize = 20;
 
 /// `$TASKSLASH_DB` when set, else `$XDG_STATE_HOME/taskslash/taskslash.db`, else
@@ -188,18 +188,56 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// The newest runs of `key`, at most 20, newest first.
-    pub fn history(&self, key: &str) -> Result<Vec<Run>, Error> {
+    /// The newest runs of `key`, at most `limit`, newest first. With `within`, only the runs whose
+    /// submitter is `within` or ends in `/<within>` (its directory name).
+    pub fn history(
+        &self,
+        key: &str,
+        limit: usize,
+        within: Option<&str>,
+    ) -> Result<Vec<Run>, Error> {
         let mut statement = self
             .conn
             .prepare(&format!(
                 "SELECT {RUN_COLUMNS} FROM runs WHERE key = ?1
+                    AND (?3 IS NULL OR submitter = ?3
+                        OR (length(submitter) > length(?3)
+                            AND substr(submitter, length(submitter) - length(?3)) = '/' || ?3))
                  ORDER BY started_at DESC, id DESC LIMIT ?2"
             ))
             .map_err(sql)?;
-        let limit = i64::try_from(HISTORY_LIMIT).unwrap_or(i64::MAX);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         statement
-            .query_map(params![key, limit], from_row)
+            .query_map(params![key, limit, within], from_row)
+            .map_err(sql)?
+            .collect::<Result<_, _>>()
+            .map_err(sql)
+    }
+
+    /// Every key with runs, the most recently run first: how many, and the newest run's start,
+    /// exit code and submitter. The newest run is the one `history` puts first.
+    pub fn keys(&self) -> Result<Vec<KeySummary>, Error> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT key, runs, started_at, exit_code, submitter FROM (
+                    SELECT key, started_at, exit_code, submitter,
+                        COUNT(*) OVER (PARTITION BY key) AS runs,
+                        ROW_NUMBER() OVER (PARTITION BY key ORDER BY started_at DESC, id DESC) AS n
+                    FROM runs)
+                 WHERE n = 1 ORDER BY started_at DESC, key",
+            )
+            .map_err(sql)?;
+        statement
+            .query_map([], |row| {
+                Ok(KeySummary {
+                    key: row.get(0)?,
+                    runs: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    last_started_at: row.get(2)?,
+                    last_exit_code: row.get(3)?,
+                    last_submitter: row.get(4)?,
+                })
+            })
             .map_err(sql)?
             .collect::<Result<_, _>>()
             .map_err(sql)

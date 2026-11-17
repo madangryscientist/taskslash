@@ -13,7 +13,7 @@ use crate::protocol::{
 };
 use crate::sampler::{FileSampler, MachineSampler, MachineSnapshot, ProcSampler};
 use crate::scheduler::{Scheduler, lock};
-use crate::store::Store;
+use crate::store::{HISTORY_LIMIT, Store};
 use std::collections::HashMap;
 use std::fs::{self, DirBuilder};
 use std::io::BufReader;
@@ -180,9 +180,19 @@ impl Daemon {
             Ok(Some(ClientMessage::Submit { .. })) => {
                 refuse(&mut writer, "submit needs a non-empty argv");
             }
-            Ok(Some(ClientMessage::History { key })) => {
-                let reply = match self.history(&key) {
+            Ok(Some(ClientMessage::History { key, limit, within })) => {
+                let limit = limit.unwrap_or(HISTORY_LIMIT);
+                let reply = match self.history(&key, limit, within.as_deref()) {
                     Ok(reply) => reply,
+                    Err(e) => DaemonMessage::Error {
+                        message: e.to_string(),
+                    },
+                };
+                let _ = send(&mut writer, &reply);
+            }
+            Ok(Some(ClientMessage::Keys)) => {
+                let reply = match self.store().keys() {
+                    Ok(keys) => DaemonMessage::Keys { keys },
                     Err(e) => DaemonMessage::Error {
                         message: e.to_string(),
                     },
@@ -208,17 +218,23 @@ impl Daemon {
             Ok(Some(ClientMessage::Exited { .. })) => {
                 refuse(
                     &mut writer,
-                    "expected submit, history, status, why, log or subscribe, got exited",
+                    "expected submit, history, keys, status, why, log or subscribe, got exited",
                 );
             }
             Err(e) => refuse(&mut writer, &format!("bad request: {e}")),
         }
     }
 
-    /// The key's runs, and its estimate under the newest run's kind (`command` with no runs).
-    fn history(&self, key: &str) -> Result<DaemonMessage, Error> {
+    /// The key's runs (at most `limit`, of `within` when given), and its estimate under the newest
+    /// run's kind (`command` with no runs).
+    fn history(
+        &self,
+        key: &str,
+        limit: usize,
+        within: Option<&str>,
+    ) -> Result<DaemonMessage, Error> {
         let store = self.store();
-        let runs = store.history(key)?;
+        let runs = store.history(key, limit, within)?;
         let kind = runs.first().map_or(Kind::Command, |run| run.kind);
         let estimate = estimate(&store.costs(key)?, kind);
         Ok(DaemonMessage::Runs { estimate, runs })

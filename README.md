@@ -24,7 +24,11 @@ taskslash run --class urgent -- bun run test                     # first in line
 taskslash moon :typecheck :test          # moon targets, one job per target
 taskslash why 7                           # why job 7 waits (or "running")
 taskslash why 7 --json                    # the reason as an object
+taskslash history                         # every key with runs, the most recently run first
 taskslash history gate                    # the estimate of "gate", then what its last 20 runs cost
+taskslash history "bun test"              # a run with no --name is keyed by its first two words
+taskslash history shop/web:test           # a taskslash moon target: <repo>/<project>:<task>
+taskslash history gate --limit 5 --where shop   # its last 5 runs submitted from the worktree "shop"
 taskslash history gate --json             # the same, as {"estimate": ..., "runs": [...]}
 taskslash status                          # is this machine busy, and with what
 taskslash status --json                   # the same, as one line of JSON
@@ -137,8 +141,14 @@ MiB written, the exit code, and the machine's pressure while it ran (`machine_cp
 `machine_mem_some`, `machine_io_some`: the mean of the `some avg10` readings taken during the run,
 null when none was). A `taskslash moon` job also records `cached` (moon replayed it from cache) and
 `moon_hash`; both are null for any other run. The key is `--name` when given, else the first two words of the command
-(`bunx moon`). `taskslash history <key>` prints the newest 20 runs of a key, `-` for a value that
-was not measured; a run whose `taskslash run` went away before the command ended has no exit code.
+(`bunx moon`). `taskslash history <key>` prints the newest 20 runs of a key (`--limit` for another
+number, `--where <dir>` for only those submitted from a worktree, by its directory name or full
+path), `-` for a value that was not measured, and the worktree each ran in; a run whose
+`taskslash run` went away before the command ended has no exit code. With no key it lists every key
+that has runs, the most recently run first, with its run count, last run, last exit code and the
+worktree it last ran in (`--json`: an array). A key with no runs exits 1 and names up to five known
+keys like it on stderr. A client newer than the daemon it talks to says so and asks you to reinstall
+the daemon.
 
 **Measurement needs a systemd user session.** The daemon checks once at startup whether
 `systemd-run --user --scope` works. When it does, every job runs in a transient scope under
