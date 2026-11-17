@@ -5,7 +5,8 @@ use crate::admission::ordinal;
 use crate::estimate::{Source, estimate};
 use crate::logs;
 use crate::measure::{self, Cost, Sampler};
-use crate::protocol::{Class, ClientMessage, DaemonMessage, Kind, Launch, receive, send};
+use crate::procfs::rfc3339;
+use crate::protocol::{Class, ClientMessage, DaemonMessage, JobEvent, Kind, Launch, receive, send};
 use crate::scheduler::Job;
 use crate::store::{self, Finished};
 use std::io::BufReader;
@@ -14,7 +15,7 @@ use std::os::unix::net::UnixStream;
 use std::process;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// How often a waiting connection checks that its client is still there.
 const WAIT_POLL: Duration = Duration::from_millis(100);
@@ -59,6 +60,16 @@ impl Daemon {
         let unit = format!("taskslash-{}-{id}", process::id());
         let log = logs::log_path(&self.logs, &unit);
         let key = store::key(name, argv);
+        self.events.publish(JobEvent::Queued {
+            job: id,
+            key: key.clone(),
+            kind,
+            class,
+            submitter: submitter.to_owned(),
+            cwd: cwd.to_owned(),
+            argv: argv.to_vec(),
+            at: now(),
+        });
         let costs = self.store().costs(&key).unwrap_or_else(|e| {
             eprintln!("taskslash: job {id} estimated from defaults: {e}");
             Vec::new()
@@ -121,11 +132,15 @@ impl Daemon {
                         // Not on the queue any more means it started meanwhile: run it as dropped.
                         if self.scheduler().leave(id) {
                             eprintln!("job {id} left the queue");
+                            self.never_started(id, &key);
                             return;
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        self.never_started(id, &key);
+                        return;
+                    }
                 }
             }
         }
@@ -139,6 +154,13 @@ impl Daemon {
             self.scheduler().set_live(id, sampler.live());
         }
         let log = log.to_string_lossy().into_owned();
+        self.events.publish(JobEvent::Started {
+            job: id,
+            unit: unit.clone(),
+            launch: self.launch,
+            log: log.clone(),
+            at: now(),
+        });
         let start = DaemonMessage::Start {
             job: id,
             unit,
@@ -158,6 +180,7 @@ impl Daemon {
             _ => (None, None, None),
         };
         let Some(running) = self.scheduler().finish(id) else {
+            self.never_started(id, &key);
             return;
         };
         let wall_ms = u64::try_from(running.clock.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -180,10 +203,21 @@ impl Daemon {
             exit_code,
             pressure: running.pressure(),
             cached,
-            moon_hash,
+            moon_hash: moon_hash.clone(),
             log_path: Some(&log),
         };
         let recorded = self.store().record(&finished);
+        self.events.publish(JobEvent::Finished {
+            job: id,
+            key: key.clone(),
+            exit_code,
+            wall_ms,
+            cached,
+            moon_hash,
+            run: recorded.as_ref().ok().copied(),
+            log: Some(log.clone()),
+            at: now(),
+        });
         // After the row, so a job that finished counts as seen when the next one is considered.
         self.admit();
         match recorded {
@@ -195,6 +229,27 @@ impl Daemon {
             Err(e) => eprintln!("taskslash: job {id} not recorded: {e}"),
         }
     }
+}
+
+impl Daemon {
+    /// The `finished` of a job that leaves before it runs, so every `queued` has one.
+    fn never_started(&self, id: u64, key: &str) {
+        self.events.publish(JobEvent::Finished {
+            job: id,
+            key: key.to_owned(),
+            exit_code: None,
+            wall_ms: 0,
+            cached: None,
+            moon_hash: None,
+            run: None,
+            log: None,
+            at: now(),
+        });
+    }
+}
+
+fn now() -> String {
+    rfc3339(SystemTime::now())
 }
 
 /// Whether the client on `stream` hung up (or sent something, which a waiting client never does).

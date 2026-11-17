@@ -30,13 +30,14 @@ taskslash logs 7                          # what running job 7 has printed so fa
 taskslash logs 7 -f                       # the same, followed until it ends
 taskslash logs --last gate                # the newest run of "gate", running or not
 taskslash logs --failed                   # the newest run that failed
+taskslash events                          # one JSON line per job queued, started, finished
 taskslash plugins                         # the plugins on PATH (below)
 ```
 
 `taskslash run` runs the command itself, in your directory, with your environment and terminal, and
 exits with its exit code (128+N when signal N killed it, 127 when it cannot be started). With no
 daemon running it does not run the command and exits 1; so do `taskslash history`,
-`taskslash status`, `taskslash why` and `taskslash logs`.
+`taskslash status`, `taskslash why`, `taskslash logs` and `taskslash events`.
 
 ### Every job's output is kept
 
@@ -293,7 +294,7 @@ There are three kinds:
 | Kind | What it does | |
 | --- | --- | --- |
 | command | `taskslash <name> [args...]` runs `taskslash-<name> [args...]` | here now |
-| listener | follows the daemon's event stream (job queued, started, ended) | coming |
+| listener | follows the daemon's event stream (job queued, started, finished) and changes nothing | here now |
 | filter | rewrites a job's output on its way to the log and the terminal (secret redaction) | coming |
 
 A command plugin replaces the `taskslash` process, so its exit code and signals are its own. Built-in
@@ -326,6 +327,42 @@ else
 fi
 ```
 <!-- plugin-example:end -->
+
+#### Listener plugins
+
+A listener follows what the daemon does with jobs and cannot change any of it. It runs
+`taskslash events`, which prints one line of JSON per job event on stdout as it happens, or it opens
+`TASKSLASH_SOCKET` and subscribes itself: send `{"type":"subscribe"}` on a connection of its own, and
+the daemon answers `{"type":"subscribed","protocol":1}`, then one event line per job event until the
+listener hangs up. `taskslash events` prints only the event lines, exits 0 when the daemon goes away
+and 1 when no daemon answers. The daemon starts no listener: run it yourself, or from a systemd unit
+of your own.
+
+```bash
+taskslash events | jq -c 'select(.event.type == "finished" and .event.exit_code != 0)'
+```
+
+Each line is `{"type":"event","protocol":1,"seq":<n>,"event":{...}}`, with `seq` counting up per
+daemon from 1. There are four events:
+
+| `event.type` | Fields | When |
+| --- | --- | --- |
+| `queued` | `job`, `key`, `kind`, `class`, `submitter`, `cwd`, `argv`, `at` | the job is submitted, before it waits |
+| `started` | `job`, `unit`, `launch`, `log`, `at` | the job is admitted and its command starts |
+| `finished` | `job`, `key`, `exit_code`, `wall_ms`, `cached`, `moon_hash`, `run`, `log`, `at` | its run is recorded, or it left before it started |
+| `dropped` | `count` | before the next event, when this listener missed some |
+
+Every `queued` gets exactly one `finished`. `exit_code` is null when the job's client went away
+before saying how the command ended, and `run` (the id `taskslash history` shows) is null when its
+row was not written. A job that never started (its client hung up while it waited) has
+`exit_code`, `run` and `log` null and `wall_ms` 0. `at` is RFC 3339, UTC. Events carry no output:
+`log` is the job's log file, which the listener reads (`taskslash logs --run <id>`). A listener sees
+only the events after it subscribed; nothing is replayed.
+
+A slow listener never slows a job. The daemon queues at most 1024 events for each listener and
+never waits for one: an event that does not fit is dropped for that listener, and the next event it
+does get is preceded by one `dropped` with how many it missed (its `seq` is the last missed one's).
+A listener whose connection fails is removed.
 
 ### Install the daemon as a systemd user unit
 

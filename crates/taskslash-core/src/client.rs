@@ -3,7 +3,7 @@
 //! reports how it ended, and returns its exit code (`taskslash moon`
 //! does the same for many jobs at once, one thread and one connection each);
 //! `taskslash history` asks for a key's recorded runs, `taskslash status` for what is running, and
-//! `taskslash why` why a job waits.
+//! `taskslash why` why a job waits, and `taskslash events` follows the job events.
 
 use crate::Error;
 use crate::admission::{Reason, waiting_line};
@@ -16,7 +16,7 @@ use crate::protocol::{
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -261,6 +261,35 @@ pub fn why(socket: &Path, job: u64) -> Result<Option<(Reason, u64, usize)>, Erro
             "job {job} not found (an ended job's record is in history)"
         ))),
         other => Err(Error::new(format!("unexpected reply {other:?}"))),
+    }
+}
+
+/// Subscribes to the daemon's job events and writes each `event` line to `out` as it arrives,
+/// unchanged, until the daemon hangs up. `subscribed` is not written.
+pub fn events(socket: &Path, out: &mut impl Write) -> Result<(), Error> {
+    let mut daemon = Connection::open(socket)?;
+    match daemon.ask(&ClientMessage::Subscribe)? {
+        DaemonMessage::Subscribed { .. } => {}
+        other => return Err(Error::new(format!("unexpected reply {other:?}"))),
+    }
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if daemon
+            .reader
+            .read_line(&mut line)
+            .map_err(|e| daemon.lost(e))?
+            == 0
+        {
+            return Ok(());
+        }
+        let message: DaemonMessage =
+            serde_json::from_str(&line).map_err(|e| daemon.lost(e.into()))?;
+        if let DaemonMessage::Event { .. } = message {
+            out.write_all(line.as_bytes())
+                .and_then(|()| out.flush())
+                .map_err(|e| Error::new(format!("cannot write the events: {e}")))?;
+        }
     }
 }
 
