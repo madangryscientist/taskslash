@@ -14,11 +14,11 @@ use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
-use taskslash_core::Error;
 use taskslash_core::admission::waiting_line;
 use taskslash_core::plugin;
 use taskslash_core::protocol::{Class, Kind, LogSelect};
-use text::{estimate_text, status_text, table};
+use taskslash_core::{Error, HISTORY_LIMIT};
+use text::{estimate_text, keys_text, status_text, table};
 
 mod text;
 mod top;
@@ -89,17 +89,33 @@ enum Commands {
         #[arg(long)]
         class: Option<Class>,
     },
-    /// Show the cost estimate of a key and its recorded runs, newest first (at most 20).
+    /// Show the cost estimate of a key and its recorded runs, newest first; with no key, list the
+    /// keys.
+    ///
+    /// With no key, one line per key that has runs, the most recently run first: when it last ran,
+    /// how many runs, the last exit code, the worktree it last ran in, and the key. With a key, the
+    /// estimate, then its newest runs (20 unless `--limit`), each with the worktree it ran in.
+    /// A key with no runs exits 1, naming up to five known keys like it.
     ///
     /// Each figure of the estimate comes from the key's history, or from its kind's default when
-    /// no run feeds it (the kind is the newest run's). A run's key is its `--name`, else the first two words of its command. A cost the daemon
-    /// could not measure (no systemd user session) shows as `-`, and as null with `--json`.
+    /// no run feeds it (the kind is the newest run's). CPU and duration come from calm runs only:
+    /// a calm run is one that ran while the machine was not under pressure (measured, with the
+    /// machine's CPU `some avg10` at most 40 during the run). A cost the daemon could not measure
+    /// (no systemd user session) shows as `-`, and as null with `--json`.
     History {
-        /// The key: a `--name`, or the first two words of a command (`"bunx moon"`).
-        key: String,
-        /// Print `{"estimate": ..., "runs": [...]}`.
+        /// The key: a --name, the first two words of a command ("bun test"), or for taskslash
+        /// moon, <repo>/<project>:<task> ("shop/web:test").
+        key: Option<String>,
+        /// Print `{"estimate": ..., "runs": [...]}`, or with no key an array of the keys.
         #[arg(long)]
         json: bool,
+        /// Show at most this many runs.
+        #[arg(long, value_name = "N", default_value_t = HISTORY_LIMIT as u64,
+              value_parser = clap::value_parser!(u64).range(1..))]
+        limit: u64,
+        /// Only the runs submitted from this worktree: its directory name, or its full path.
+        #[arg(long = "where", value_name = "DIR")]
+        within: Option<String>,
     },
     /// Show what the machine and the running jobs are doing, from the daemon's latest readings.
     ///
@@ -260,6 +276,66 @@ fn plugin(argv: Vec<OsString>) -> Error {
         .exit()
 }
 
+/// `taskslash history`: the keys when `key` is `None`, else the key's estimate and runs. A key with
+/// no runs (in `within`, when given) is an error naming keys like it.
+fn history(
+    socket: &std::path::Path,
+    key: Option<&str>,
+    json: bool,
+    limit: usize,
+    within: Option<&str>,
+) -> Result<i32, Error> {
+    let text = match key {
+        None => {
+            let keys = taskslash_core::keys(socket)?;
+            if json {
+                taskslash_core::protocol::keys_json(&keys)
+            } else {
+                keys_text(&keys)
+            }
+        }
+        Some(key) => {
+            let (estimate, runs) = taskslash_core::history(socket, key, limit, within)?;
+            if runs.is_empty() {
+                return Err(no_runs(socket, key, within)?);
+            }
+            if json {
+                taskslash_core::protocol::history_json(&estimate, &runs)
+            } else {
+                format!("{}{}", estimate_text(&estimate), table(&runs))
+            }
+        }
+    };
+    write!(io::stdout(), "{text}")
+        .map_err(|e| Error::new(format!("cannot write the runs: {e}")))?;
+    Ok(0)
+}
+
+/// The error for a key with no runs: in `within` when the key has runs elsewhere, else with up to
+/// five known keys like it.
+fn no_runs(socket: &std::path::Path, key: &str, within: Option<&str>) -> Result<Error, Error> {
+    let keys: Vec<String> = taskslash_core::keys(socket)?
+        .into_iter()
+        .map(|k| k.key)
+        .collect();
+    if let Some(within) = within
+        && keys.iter().any(|k| k == key)
+    {
+        return Ok(Error::new(format!("no runs of \"{key}\" in {within}")));
+    }
+    let like = taskslash_core::protocol::suggest(key, &keys);
+    let mut message = format!("no runs of \"{key}\"");
+    if like.is_empty() {
+        message.push_str("\n  'taskslash history' with no key lists the keys");
+    } else {
+        message.push_str("\n  keys like it:");
+        for k in like {
+            message.push_str(&format!("\n    {k}"));
+        }
+    }
+    Ok(Error::new(message))
+}
+
 fn dispatch(command: Commands) -> Result<i32, Error> {
     let socket = taskslash_core::socket_path;
     match command {
@@ -333,16 +409,14 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
                 .map_err(|e| Error::new(format!("cannot write the reason: {e}")))?;
             Ok(0)
         }
-        Commands::History { key, json } => {
-            let (estimate, runs) = taskslash_core::history(&socket()?, &key)?;
-            let text = if json {
-                taskslash_core::protocol::history_json(&estimate, &runs)
-            } else {
-                format!("{}{}", estimate_text(&estimate), table(&runs))
-            };
-            write!(io::stdout(), "{text}")
-                .map_err(|e| Error::new(format!("cannot write the runs: {e}")))?;
-            Ok(0)
+        Commands::History {
+            key,
+            json,
+            limit,
+            within,
+        } => {
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            history(&socket()?, key.as_deref(), json, limit, within.as_deref())
         }
         Commands::Status { json } => {
             let status = taskslash_core::status(&socket()?)?;

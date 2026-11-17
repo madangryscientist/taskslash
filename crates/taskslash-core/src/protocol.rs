@@ -7,7 +7,7 @@
 //! row has no exit code.
 //!
 //! A query: the client sends `history`; the daemon answers `runs` (the key's estimate and its runs)
-//! and closes. Or it sends `status`; the daemon answers `status` (the machine's latest snapshot, the
+//! and closes. Or it sends `keys`; the daemon answers `keys` (every key with runs, newest first). Or it sends `status`; the daemon answers `status` (the machine's latest snapshot, the
 //! running jobs and the waiting ones). Or `why`; the daemon answers `why` (whether the job waits,
 //! runs or is not held, and why it waits). Or `log`; the daemon answers `log` (the job or run it
 //! picked and where its log is).
@@ -127,8 +127,17 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         moon_hash: Option<String>,
     },
-    /// Ask for the recorded runs of `key`, newest first.
-    History { key: String },
+    /// Ask for the recorded runs of `key`, newest first: at most `limit` (20 when not given), and
+    /// only those whose submitter is `within` or whose submitter's directory name is, when given.
+    History {
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+        within: Option<String>,
+    },
+    /// Ask for every key with recorded runs, the most recently run first.
+    Keys,
     /// Ask what the machine and the running jobs are doing.
     Status,
     /// Ask why job `job` waits.
@@ -203,8 +212,10 @@ pub enum DaemonMessage {
     },
     /// The job's end is recorded.
     Recorded { job: u64 },
-    /// The answer to `history`: the key's estimate and at most 20 runs, newest first.
+    /// The answer to `history`: the key's estimate and its runs, newest first.
     Runs { estimate: Estimate, runs: Vec<Run> },
+    /// The answer to `keys`: every key with recorded runs, the most recently run first.
+    Keys { keys: Vec<KeySummary> },
     /// The answer to `status`.
     Status(Box<Status>),
     /// The answer to `why`: `reason`, `waited_s` and `position` are set when `state` is `waiting`.
@@ -318,6 +329,78 @@ pub struct Run {
     /// The file its output was copied into; `None` for a run recorded before capture. The file
     /// may be gone: retention deletes old logs and keeps the path.
     pub log_path: Option<String>,
+}
+
+/// A key with recorded runs, as `keys` answers: how many, and the newest one's start, exit code
+/// and submitter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeySummary {
+    pub key: String,
+    pub runs: u64,
+    /// RFC 3339, UTC.
+    pub last_started_at: String,
+    /// `None` when the newest run's client went away before reporting how the command ended.
+    pub last_exit_code: Option<i32>,
+    pub last_submitter: String,
+}
+
+/// The last part of a submitter's path: its worktree, as `top` and `history` show it.
+pub fn worktree(submitter: &str) -> &str {
+    std::path::Path::new(submitter)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(submitter)
+}
+
+/// Whether a run from `submitter` is one `--where <within>` keeps: the submitter is `within`, or its
+/// directory name is.
+pub fn submitted_from(submitter: &str, within: &str) -> bool {
+    submitter == within
+        || submitter
+            .strip_suffix(within)
+            .is_some_and(|head| head.ends_with('/'))
+}
+
+/// The keys as a pretty JSON array and a newline, as `taskslash history --json` with no key prints
+/// it: each summary with its `worktree` besides.
+pub fn keys_json(keys: &[KeySummary]) -> String {
+    #[derive(Serialize)]
+    struct Entry<'a> {
+        #[serde(flatten)]
+        summary: &'a KeySummary,
+        worktree: &'a str,
+    }
+    let entries: Vec<Entry> = keys
+        .iter()
+        .map(|summary| Entry {
+            summary,
+            worktree: worktree(&summary.last_submitter),
+        })
+        .collect();
+    let mut text = serde_json::to_string_pretty(&entries).unwrap_or_default();
+    text.push('\n');
+    text
+}
+
+/// Up to five of `keys` that `text` may have meant: those containing it (ignoring case) in their
+/// order, then the closest by Jaro similarity above 0.7, without repeats.
+pub fn suggest<'a>(text: &str, keys: &'a [String]) -> Vec<&'a str> {
+    const MAX: usize = 5;
+    let lower = text.to_lowercase();
+    let mut out: Vec<&str> = keys
+        .iter()
+        .filter(|k| k.to_lowercase().contains(&lower))
+        .map(String::as_str)
+        .take(MAX)
+        .collect();
+    let mut near: Vec<(f64, &str)> = keys
+        .iter()
+        .map(|k| (strsim::jaro(text, k), k.as_str()))
+        .filter(|(score, k)| *score > 0.7 && !out.contains(k))
+        .collect();
+    near.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out.extend(near.into_iter().map(|(_, k)| k).take(MAX - out.len()));
+    out
 }
 
 /// `{"estimate":...,"runs":[...]}`, pretty, and a newline, as `taskslash history --json` prints it.

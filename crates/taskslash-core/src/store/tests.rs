@@ -47,7 +47,7 @@ fn a_plain_run_is_recorded_with_null_costs() {
             Cost::default(),
         ))
         .unwrap();
-    let runs = store.history("k").unwrap();
+    let runs = store.history("k", HISTORY_LIMIT, None).unwrap();
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
     assert_eq!(run.argv, argv);
@@ -76,12 +76,17 @@ fn history_is_newest_first_and_at_most_20() {
             .record(&finished(&argv, Launch::Scope, at * 1000, cost.clone()))
             .unwrap();
     }
-    let runs = store.history("k").unwrap();
+    let runs = store.history("k", HISTORY_LIMIT, None).unwrap();
     assert_eq!(runs.len(), HISTORY_LIMIT);
     assert_eq!(runs[0].started_at, "1970-01-01T00:00:24.000Z");
     assert_eq!(runs[0].cpu_usec, Some(5));
     assert_eq!(runs[0].written_bytes, Some(0));
-    assert!(store.history("other").unwrap().is_empty());
+    assert!(
+        store
+            .history("other", HISTORY_LIMIT, None)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -125,7 +130,7 @@ fn a_key_is_seen_once_a_run_finished_and_costs_are_its_measured_runs() {
         (costs[0].cpu_usec, costs[0].machine_cpu_some),
         (Some(7), Some(1.5))
     );
-    let run = &store.history("k").unwrap()[0];
+    let run = &store.history("k", HISTORY_LIMIT, None).unwrap()[0];
     assert_eq!(run.kind, Kind::Test);
     assert_eq!(
         (
@@ -159,7 +164,7 @@ fn a_cache_hit_and_its_hash_are_recorded_and_read_back() {
         .record(&finished(&argv, Launch::Scope, 1000, cost))
         .unwrap();
     assert!(store.seen("k").unwrap());
-    let runs = store.history("k").unwrap();
+    let runs = store.history("k", HISTORY_LIMIT, None).unwrap();
     assert_eq!(
         (runs[0].cached, runs[0].moon_hash.as_deref()),
         (Some(true), Some("74ea"))
@@ -191,4 +196,78 @@ fn a_run_with_no_exit_code_is_not_a_failure_and_log_ends_add_the_wall_time() {
     );
     // Started at 1000 ms and ran 12 ms.
     assert!(store.log_ends().unwrap().contains(&("/l".to_owned(), 1012)));
+}
+
+fn at<'a>(
+    key: &'a str,
+    submitter: &'a str,
+    argv: &'a [String],
+    ms: u64,
+    exit: i32,
+) -> Finished<'a> {
+    Finished {
+        key,
+        submitter,
+        exit_code: Some(exit),
+        ..finished(argv, Launch::Plain, ms, Cost::default())
+    }
+}
+
+#[test]
+fn keys_are_newest_first_with_counts_and_the_newest_runs_exit_and_submitter() {
+    let store = Store::in_memory();
+    let argv = words(&["true"]);
+    store.record(&at("old", "/w/a", &argv, 1_000, 0)).unwrap();
+    store.record(&at("new", "/w/a", &argv, 2_000, 0)).unwrap();
+    store.record(&at("new", "/w/b", &argv, 5_000, 3)).unwrap();
+    store.record(&at("new", "/w/a", &argv, 4_000, 0)).unwrap();
+    store.record(&at("mid", "/w/c", &argv, 3_000, 1)).unwrap();
+    let keys = store.keys().unwrap();
+    let got: Vec<(&str, u64, Option<i32>, &str)> = keys
+        .iter()
+        .map(|k| {
+            (
+                k.key.as_str(),
+                k.runs,
+                k.last_exit_code,
+                k.last_submitter.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("new", 3, Some(3), "/w/b"),
+            ("mid", 1, Some(1), "/w/c"),
+            ("old", 1, Some(0), "/w/a"),
+        ]
+    );
+    assert_eq!(keys[0].last_started_at, "1970-01-01T00:00:05.000Z");
+    assert!(Store::in_memory().keys().unwrap().is_empty());
+}
+
+#[test]
+fn history_takes_a_limit_and_a_directory() {
+    let store = Store::in_memory();
+    let argv = words(&["true"]);
+    for ms in 0..5 {
+        store
+            .record(&at("k", "/dev/shop", &argv, ms * 1000, 0))
+            .unwrap();
+    }
+    store
+        .record(&at("k", "/dev/myshop", &argv, 9_000, 0))
+        .unwrap();
+    store
+        .record(&at("k", "/elsewhere/shop", &argv, 8_000, 0))
+        .unwrap();
+    assert_eq!(store.history("k", 3, None).unwrap().len(), 3);
+    let shop = store.history("k", 20, Some("shop")).unwrap();
+    let dirs: Vec<&str> = shop.iter().map(|r| r.submitter.as_str()).collect();
+    assert_eq!(dirs.len(), 6, "the name, not a suffix of it: {dirs:?}");
+    assert_eq!(dirs[0], "/elsewhere/shop");
+    let full = store.history("k", 20, Some("/dev/shop")).unwrap();
+    assert_eq!(full.len(), 5, "a full path matches the full path");
+    assert_eq!(store.history("k", 2, Some("shop")).unwrap().len(), 2);
+    assert!(store.history("k", 20, Some("hop")).unwrap().is_empty());
 }

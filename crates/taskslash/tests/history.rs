@@ -38,6 +38,7 @@ impl Scratch {
             .env("TASKSLASH_SOCKET", self.dir.join("d.sock"))
             .env("TASKSLASH_DB", self.dir.join("runs.db"))
             .env("TASKSLASH_FAKE_MACHINE", self.dir.join("machine.json"))
+            .current_dir(&self.dir)
             .stdin(Stdio::null());
         command
     }
@@ -178,9 +179,10 @@ fn history_estimates_from_the_newest_kind_and_says_where_each_figure_came_from()
             assert_eq!(estimate["source"][figure], "default", "{estimate}");
         }
     }
-    let empty = daemon.scratch.history_json("never");
-    assert_eq!(empty["estimate"]["mem_mib"], 2048, "{empty}");
-    assert_eq!(empty["runs"], serde_json::json!([]), "{empty}");
+    // A key with no runs is not answered with a default estimate as if it were real.
+    let never = daemon.scratch.run(&["history", "never", "--json"]);
+    assert_eq!(never.status.code(), Some(1), "{never:?}");
+    assert!(never.stdout.is_empty(), "{never:?}");
 }
 
 #[test]
@@ -275,10 +277,175 @@ fn plain_history_prints_a_header_and_a_line_per_run() {
             "peak_mem_mib",
             "written_mib",
             "exit",
-            "cached"
+            "cached",
+            "where"
         ]
     );
-    // Newest first; `-` in `cached` for a run that is not a moon target's.
-    assert!(lines[3].ends_with(" 3       -"), "{text}");
-    assert!(lines[4].ends_with(" 0       -"), "{text}");
+    // Newest first; `-` in `cached` for a run that is not a moon target's; then the worktree.
+    let dir = daemon.scratch.dir.file_name().unwrap().to_string_lossy();
+    assert!(lines[3].ends_with(&format!(" 3       -  {dir}")), "{text}");
+    assert!(lines[4].ends_with(&format!(" 0       -  {dir}")), "{text}");
+}
+
+fn ok(out: &Output) {
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+#[test]
+fn history_with_no_key_lists_the_keys_newest_first() {
+    let daemon = Scratch::new().daemon();
+    for name in ["alpha", "beta", "alpha"] {
+        ok(&daemon.scratch.run(&["run", "--name", name, "--", "true"]));
+    }
+    let out = daemon
+        .scratch
+        .run(&["run", "--name", "gamma", "--", "sh", "-c", "exit 5"]);
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    let out = daemon.scratch.run(&["history"]);
+    ok(&out);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<Vec<&str>> = text
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    assert_eq!(
+        lines[0],
+        ["last_run", "runs", "exit", "where", "key"],
+        "{text}"
+    );
+    let dir = daemon.scratch.dir.file_name().unwrap().to_string_lossy();
+    let rows: Vec<(&str, &str, &str, &str)> = lines[1..]
+        .iter()
+        .map(|l| (l[1], l[2], l[3], l[4]))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("1", "5", &*dir, "gamma"),
+            ("2", "0", &*dir, "alpha"),
+            ("1", "0", &*dir, "beta"),
+        ],
+        "{text}"
+    );
+
+    let out = daemon.scratch.run(&["history", "--json"]);
+    ok(&out);
+    let keys: Value = serde_json::from_slice(&out.stdout).expect("history prints JSON");
+    let keys = keys.as_array().expect("an array");
+    assert_eq!(keys.len(), 3, "{keys:?}");
+    assert_eq!(keys[0]["key"], "gamma");
+    assert_eq!(keys[0]["runs"], 1);
+    assert_eq!(keys[0]["last_exit_code"], 5);
+    assert_eq!(keys[0]["worktree"], &*dir);
+    assert_eq!(keys[1]["key"], "alpha");
+    assert_eq!(keys[1]["runs"], 2);
+    assert!(
+        keys[0]["last_started_at"].as_str().unwrap()
+            >= keys[1]["last_started_at"].as_str().unwrap()
+    );
+}
+
+#[test]
+fn an_unknown_key_exits_1_naming_keys_like_it() {
+    let daemon = Scratch::new().daemon();
+    for name in ["shop/web:test", "shop/api:test", "bun test"] {
+        ok(&daemon.scratch.run(&["run", "--name", name, "--", "true"]));
+    }
+    let out = daemon.scratch.run(&["history", "web"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.starts_with("taskslash: no runs of \"web\"\n"), "{err}");
+    assert!(err.contains("    shop/web:test\n"), "{err}");
+    assert!(!err.contains("shop/api:test"), "{err}");
+
+    let out = daemon.scratch.run(&["history", "TEST", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    for key in ["shop/web:test", "shop/api:test", "bun test"] {
+        assert!(err.contains(&format!("    {key}\n")), "{err}");
+    }
+
+    let out = daemon.scratch.run(&["history", "zzzzzzzz"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("with no key lists the keys"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn limit_and_where_filter_the_runs() {
+    let daemon = Scratch::new().daemon();
+    let other = daemon.scratch.dir.join("other");
+    fs::create_dir(&other).unwrap();
+    for _ in 0..4 {
+        ok(&daemon.scratch.run(&["run", "--name", "k", "--", "true"]));
+    }
+    ok(&daemon
+        .scratch
+        .command(&["run", "--name", "k", "--", "true"])
+        .current_dir(&other)
+        .output()
+        .unwrap());
+
+    let runs = |args: &[&str]| -> Vec<Value> {
+        let mut all = vec!["history", "k", "--json"];
+        all.extend_from_slice(args);
+        let out = daemon.scratch.run(&all);
+        ok(&out);
+        let history: Value = serde_json::from_slice(&out.stdout).unwrap();
+        history["runs"].as_array().unwrap().clone()
+    };
+    assert_eq!(runs(&[]).len(), 5);
+    assert_eq!(runs(&["--limit", "3"]).len(), 3);
+    let there = runs(&["--where", "other"]);
+    assert_eq!(there.len(), 1, "{there:?}");
+    assert_eq!(there[0]["submitter"], other.to_string_lossy().as_ref());
+    let full = runs(&[
+        "--where",
+        &daemon.scratch.dir.to_string_lossy(),
+        "--limit",
+        "2",
+    ]);
+    assert_eq!(full.len(), 2, "{full:?}");
+
+    let out = daemon.scratch.run(&["history", "k", "--where", "nowhere"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "taskslash: no runs of \"k\" in nowhere\n"
+    );
+    let out = daemon.scratch.run(&["history", "k", "--limit", "0"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+}
+
+#[test]
+fn a_daemon_older_than_the_client_is_named_as_such() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    let scratch = Scratch::new();
+    let listener = UnixListener::bind(scratch.dir.join("d.sock")).unwrap();
+    let old = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        (&stream)
+            .write_all(
+                b"{\"type\":\"error\",\"message\":\"bad request: unknown variant `keys`, expected one of `submit`, `exited`, `history` at line 1 column 14\"}\n",
+            )
+            .unwrap();
+        line
+    });
+    let out = scratch.run(&["history"]);
+    assert_eq!(old.join().unwrap(), "{\"type\":\"keys\"}\n");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "taskslash: the daemon is older than this client; reinstall it (bun scripts/install-service.ts)\n"
+    );
 }

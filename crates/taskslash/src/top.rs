@@ -11,9 +11,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
 use taskslash_core::admission::ordinal;
-use taskslash_core::protocol::{Class, JobEvent, JobStatus, Status, WaitingStatus};
+use taskslash_core::protocol::{Class, JobEvent, JobStatus, Status, WaitingStatus, worktree};
 
 mod shell;
 pub use shell::run;
@@ -399,14 +398,6 @@ fn duration(seconds: f64) -> String {
         60..3600 => format!("{}m{:02}s", s / 60, s % 60),
         _ => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
     }
-}
-
-/// The last part of a submitter's path: the worktree.
-fn worktree(submitter: &str) -> &str {
-    Path::new(submitter)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(submitter)
 }
 
 /// How a finished job ended. A job that never started has no exit code (the daemon sends null).

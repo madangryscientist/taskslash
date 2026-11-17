@@ -11,8 +11,8 @@ use crate::capture;
 use crate::estimate::Estimate;
 use crate::launch;
 use crate::protocol::{
-    Class, ClientMessage, DaemonMessage, JobEvent, JobState, Kind, Launch, Run, Status, receive,
-    send,
+    Class, ClientMessage, DaemonMessage, JobEvent, JobState, KeySummary, Kind, Launch, Run, Status,
+    receive, send, submitted_from,
 };
 use std::env;
 use std::ffi::OsString;
@@ -222,14 +222,50 @@ pub(crate) fn run_job(
     Ok((code, report))
 }
 
-/// The estimate of `key` and its recorded runs, newest first, at most 20.
-pub fn history(socket: &Path, key: &str) -> Result<(Estimate, Vec<Run>), Error> {
+/// The estimate of `key` and its recorded runs, newest first: at most `limit`, and with `within`
+/// only those submitted from that directory (a full path, or a directory's name). Both are applied
+/// here too, so a daemon older than these fields still answers right.
+pub fn history(
+    socket: &Path,
+    key: &str,
+    limit: usize,
+    within: Option<&str>,
+) -> Result<(Estimate, Vec<Run>), Error> {
     let mut daemon = Connection::open(socket)?;
     match daemon.ask(&ClientMessage::History {
         key: key.to_owned(),
+        limit: Some(limit),
+        within: within.map(str::to_owned),
     })? {
-        DaemonMessage::Runs { estimate, runs } => Ok((estimate, runs)),
+        DaemonMessage::Runs { estimate, mut runs } => {
+            if let Some(within) = within {
+                runs.retain(|run| submitted_from(&run.submitter, within));
+            }
+            runs.truncate(limit);
+            Ok((estimate, runs))
+        }
         other => Err(Error::new(format!("unexpected reply {other:?}"))),
+    }
+}
+
+/// Every key with recorded runs, the most recently run first.
+pub fn keys(socket: &Path) -> Result<Vec<KeySummary>, Error> {
+    let mut daemon = Connection::open(socket)?;
+    match daemon.ask(&ClientMessage::Keys).map_err(older_daemon)? {
+        DaemonMessage::Keys { keys } => Ok(keys),
+        other => Err(Error::new(format!("unexpected reply {other:?}"))),
+    }
+}
+
+/// What a daemon that does not know a message says (`bad request: unknown variant ...`), worded
+/// as what to do about it; any other error as it is.
+fn older_daemon(e: Error) -> Error {
+    if e.to_string().contains("unknown variant") {
+        Error::new(
+            "the daemon is older than this client; reinstall it (bun scripts/install-service.ts)",
+        )
+    } else {
+        e
     }
 }
 
@@ -352,7 +388,8 @@ fn exit_code(status: ExitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{submitter, subscribe};
+    use super::{older_daemon, submitter, subscribe};
+    use crate::Error;
     use crate::protocol::JobEvent;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
@@ -420,6 +457,22 @@ mod tests {
                 JobEvent::Dropped { count: 3 },
                 JobEvent::Dropped { count: 4 }
             ]
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_does_not_know_the_message_reads_as_reinstall_it() {
+        let refused = Error::new(
+            "the daemon refused: bad request: unknown variant `keys`, expected one of `submit`, `history`",
+        );
+        assert_eq!(
+            older_daemon(refused).to_string(),
+            "the daemon is older than this client; reinstall it (bun scripts/install-service.ts)"
+        );
+        let other = Error::new("the daemon refused: database: disk I/O error");
+        assert_eq!(
+            older_daemon(other).to_string(),
+            "the daemon refused: database: disk I/O error"
         );
     }
 }
