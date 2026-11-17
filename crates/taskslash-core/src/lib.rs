@@ -20,7 +20,7 @@ mod client;
 mod daemon;
 pub mod estimate;
 mod launch;
-pub mod logs;
+mod logs;
 mod measure;
 mod moon;
 mod moon_run;

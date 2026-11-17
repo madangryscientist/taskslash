@@ -50,8 +50,7 @@ the whole output is still there afterwards: `taskslash logs --last 'bun run'`.
   your matching stream and into the log, so `> out 2> err` still splits them.
 - **Signals.** The command runs in a process group of its own. SIGINT, SIGTERM and SIGHUP sent to
   `taskslash run` (Ctrl-C included) are passed on to that group, so the command ends the way it
-  would have without TaskSlash, and the exit code is still its own. Ctrl-Z stops it and you get
-  your shell back; `fg` continues it.
+  would have without TaskSlash, and the exit code is still its own.
 
 `taskslash moon` does the same for each target: its stdout and stderr go to you and into that
 target's own log.
@@ -64,8 +63,8 @@ again at 1 when the daemon restarts, and the pid keeps the names apart. `tasksla
 shows each running job's `log_path`, and `taskslash history --json` each run's (null for a run
 recorded before logs were kept).
 
-**Retention.** At startup and once an hour, the daemon deletes the logs of jobs that ended over 7
-days ago, then the oldest ended ones until the directory is under 1 GiB. A running job's log is never
+**Retention.** At startup and once an hour, the daemon deletes the logs (`taskslash-*.log`, nothing
+else in the directory) of jobs that ended over 7 days ago, then the oldest ended ones until the directory is under 1 GiB. A running job's log is never
 deleted. `TASKSLASH_LOG_DAYS` (days, fractions allowed) and `TASKSLASH_LOG_MIB` change the limits.
 The run's row keeps the path of a deleted log.
 

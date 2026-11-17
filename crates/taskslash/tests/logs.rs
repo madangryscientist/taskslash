@@ -387,7 +387,8 @@ fn running_jobs(scratch: &Scratch) -> Vec<u64> {
 fn logs_follows_a_running_job_until_it_ends() {
     let scratch = Scratch::new(None);
     let _daemon = scratch.daemon(&[]);
-    let script = "echo one; sleep 1; echo two";
+    // It ends only once the test creates `go`, so `-f` always meets it running.
+    let script = "echo one; while [ ! -e go ]; do sleep 0.05; done; echo two";
     let mut job = scratch
         .command(&["run", "--", "sh", "-c", script])
         .stdout(Stdio::null())
@@ -410,7 +411,15 @@ fn logs_follows_a_running_job_until_it_ends() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    let followed = scratch.run(&["logs", &n.to_string(), "-f"]);
+    let follow = scratch
+        .command(&["logs", &n.to_string(), "-f"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(300));
+    fs::write(scratch.dir.join("go"), "").unwrap();
+    let followed = follow.wait_with_output().unwrap();
     assert_eq!(followed.status.code(), Some(0), "{followed:?}");
     assert_eq!(text(&followed.stdout), "one\ntwo\n");
     assert_eq!(job.wait().unwrap().code(), Some(0));

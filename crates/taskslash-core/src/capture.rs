@@ -5,7 +5,8 @@
 //! forwarded to it when stdin is a terminal too; otherwise on two pipes, stdout and stderr each
 //! copied to the caller's matching stream. Either way the command is in a process group of its
 //! own, and SIGINT, SIGTERM and SIGHUP sent to the client are forwarded to that group. The caller's
-//! terminal is put back as it was when the command ends, and when it is stopped (Ctrl-Z).
+//! terminal is put back as it was when the command ends, and when it is stopped (Ctrl-Z, on the
+//! pipe path: on a pseudo-terminal the command's group is orphaned, so the kernel drops its stop).
 
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
@@ -111,10 +112,13 @@ pub(crate) fn pump(
                 Ok(n) => {
                     let chunk = &buf[..n];
                     if source.output
-                        && let Some(log) = log.as_mut()
+                        && let Some(file) = log.as_mut()
+                        && let Err(e) = file.write_all(chunk)
                     {
-                        // A full disk loses the log, never the caller's copy or the job.
-                        let _ = log.write_all(chunk);
+                        // A full disk loses the rest of the log, never the caller's copy or the
+                        // job; said once, so a short log is not taken for the whole output.
+                        eprintln!("taskslash: warning: the log stops here: {e}");
+                        log = None;
                     }
                     deliver(i, chunk)
                 }
@@ -131,8 +135,9 @@ pub(crate) fn pump(
     }
 }
 
-/// Writes all of `bytes` to `fd`, unbuffered.
-pub(crate) fn write_fd(fd: RawFd, mut bytes: &[u8]) -> io::Result<()> {
+/// Writes all of `bytes` to `fd`, unbuffered. When `fd` is non-blocking and full, waits for room,
+/// unless `drop_when_full`, which returns `WouldBlock` with the rest unwritten.
+fn write_fd(fd: RawFd, mut bytes: &[u8], drop_when_full: bool) -> io::Result<()> {
     while !bytes.is_empty() {
         // SAFETY: `bytes` is valid for `bytes.len()` bytes.
         let wrote = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
@@ -140,8 +145,18 @@ pub(crate) fn write_fd(fd: RawFd, mut bytes: &[u8]) -> io::Result<()> {
             Ok(n) => bytes = &bytes[n..],
             Err(_) => {
                 let e = io::Error::last_os_error();
-                if e.kind() != io::ErrorKind::Interrupted {
-                    return Err(e);
+                match e.kind() {
+                    io::ErrorKind::Interrupted => {}
+                    io::ErrorKind::WouldBlock if !drop_when_full => {
+                        let mut room = libc::pollfd {
+                            fd,
+                            events: libc::POLLOUT,
+                            revents: 0,
+                        };
+                        // SAFETY: one valid pollfd; -1 waits until there is room or an error.
+                        unsafe { libc::poll(&raw mut room, 1, -1) };
+                    }
+                    _ => return Err(e),
                 }
             }
         }
@@ -385,6 +400,14 @@ pub(crate) fn run(mut command: Command, mut log: Option<File>) -> io::Result<Exi
     }
     // The stdin copy writes to a master of its own, which outlives the copy loop's.
     let to_master = master.as_ref().map(OwnedFd::try_clone).transpose()?;
+    if let Some(master) = &master {
+        // SAFETY: sets a flag on an fd we own (shared with its copies). Reads happen only after
+        // poll says there is data, so only the input writes see EAGAIN.
+        errno(
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+            (),
+        )?;
+    }
     let forwarder = Forwarder::start(master.as_ref().map(OwnedFd::try_clone).transpose()?);
     let mut child = command.spawn()?;
     // The command's copies of the terminal's other end are closed with it, so reading the master
@@ -438,8 +461,15 @@ pub(crate) fn run(mut command: Command, mut log: Option<File>) -> io::Result<Exi
         let log = log.as_mut();
         let sinks = &sinks;
         scope.spawn(move || {
+            let outputs: Vec<bool> = sources.iter().map(|s| s.output).collect();
             pump(sources, log, done, |i, chunk| {
-                write_fd(sinks[i], chunk).is_ok()
+                // Input the command's terminal has no room for is dropped, as a full terminal
+                // drops it, rather than stop the copying of the output.
+                let input = !outputs[i];
+                match write_fd(sinks[i], chunk, input) {
+                    Err(e) if input && e.kind() == io::ErrorKind::WouldBlock => true,
+                    written => written.is_ok(),
+                }
             });
         });
         let status = wait(pid, &caller);

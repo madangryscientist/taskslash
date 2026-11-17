@@ -5,7 +5,7 @@ use crate::Error;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, DirBuilder};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -23,13 +23,14 @@ pub fn logs_dir(db: &Path) -> PathBuf {
     }
 }
 
-/// Creates `dir` (and its parents) and makes it mode 0700: logs hold whatever a command printed.
+/// Creates `dir` (and its parents) with mode 0700 when missing: logs hold whatever a command
+/// printed. A directory that is already there (`TASKSLASH_LOGS` may name one of yours) is left as
+/// it is.
 pub fn create_dir(dir: &Path) -> Result<(), Error> {
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)
-        .and_then(|()| fs::set_permissions(dir, fs::Permissions::from_mode(0o700)))
         .map_err(|e| Error::new(format!("cannot create {}: {e}", dir.display())))
 }
 
@@ -106,7 +107,7 @@ pub fn expired(files: &[LogFile], now: SystemTime, keep: &Retention) -> Vec<Path
     gone
 }
 
-/// Deletes the expired `*.log` files in `dir`. A file is running when it is in `running`; else it
+/// Deletes the expired logs in `dir`. A file is running when it is in `running`; else it
 /// ended when `ended` says (from its run's row), or at its last write when no row names it.
 /// Returns the deleted paths.
 pub fn sweep(
@@ -121,7 +122,7 @@ pub fn sweep(
     };
     let files: Vec<LogFile> = entries
         .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+        .filter(|e| is_log_name(&e.file_name().to_string_lossy()))
         .filter_map(|e| {
             let meta = e.metadata().ok().filter(fs::Metadata::is_file)?;
             let path = e.path();
@@ -145,13 +146,25 @@ pub fn sweep(
         .collect();
     expired(&files, now, keep)
         .into_iter()
-        .filter(|path| fs::remove_file(path).is_ok())
+        .filter(|path| match fs::remove_file(path) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("taskslash: cannot delete {}: {e}", path.display());
+                false
+            }
+        })
         .collect()
+}
+
+/// Whether `name` is a log `log_path` names: `taskslash-<...>.log`. Retention touches nothing else.
+fn is_log_name(name: &str) -> bool {
+    name.starts_with("taskslash-") && name.ends_with(".log")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     const HOUR: Duration = Duration::from_secs(3600);
 
@@ -217,27 +230,49 @@ mod tests {
             fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
             0o700
         );
-        for name in ["old.log", "running.log", "recent.log", "notes.txt"] {
+        let names = [
+            "taskslash-1-1.log",
+            "taskslash-1-2.log",
+            "taskslash-1-3.log",
+            "build.log",
+            "notes.txt",
+        ];
+        for name in names {
             fs::write(dir.join(name), "x").unwrap();
         }
         let now = SystemTime::now();
-        let running = HashSet::from([dir.join("running.log")]);
+        // Job 1 ended long ago, job 2 runs, job 3 has no row, so its last write counts (now).
+        let running = HashSet::from([dir.join("taskslash-1-2.log")]);
         let ended = HashMap::from([
-            (dir.join("old.log"), now - HOUR * 200),
-            (dir.join("running.log"), now - HOUR * 200),
+            (dir.join("taskslash-1-1.log"), now - HOUR * 200),
+            (dir.join("taskslash-1-2.log"), now - HOUR * 200),
         ]);
+        // Another tool's old log in the same directory is not ours to delete.
+        let old = fs::File::options()
+            .write(true)
+            .open(dir.join("build.log"))
+            .unwrap();
+        old.set_modified(now - HOUR * 1000).unwrap();
         let keep = Retention {
             max_age: HOUR * 168,
             max_bytes: 1 << 30,
         };
         let gone = sweep(&dir, &running, &ended, &keep, now);
-        assert_eq!(gone, [dir.join("old.log")]);
+        assert_eq!(gone, [dir.join("taskslash-1-1.log")]);
         let mut left: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         left.sort();
-        assert_eq!(left, ["notes.txt", "recent.log", "running.log"]);
+        assert_eq!(
+            left,
+            [
+                "build.log",
+                "notes.txt",
+                "taskslash-1-2.log",
+                "taskslash-1-3.log"
+            ]
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }
