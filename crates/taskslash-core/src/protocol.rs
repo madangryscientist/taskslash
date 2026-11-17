@@ -154,7 +154,7 @@ pub enum ClientMessage {
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum LogSelect {
     /// A job by its number: one the daemon holds, or one that ended since it started (it remembers
-    /// the newest [`ENDED_JOBS`] of those).
+    /// the newest 1000 of those).
     Job { job: u64 },
     /// A recorded run, by its id.
     Run { run: i64 },
@@ -169,9 +169,6 @@ pub enum LogSelect {
         within: Option<String>,
     },
 }
-
-/// How many ended jobs the daemon remembers the run of, for `LogSelect::Job`.
-pub const ENDED_JOBS: usize = 1000;
 
 /// What a `log` query found: a running or waiting job (`job`), or a recorded run (`run`), and its
 /// log file. `log_path` is `None` for a waiting job and for a run recorded before capture.

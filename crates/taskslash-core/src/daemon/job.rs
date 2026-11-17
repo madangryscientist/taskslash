@@ -192,7 +192,16 @@ impl Daemon {
             }) if job == id => (Some(code), cached, moon_hash),
             _ => (None, None, None),
         };
-        let Some(running) = self.scheduler().finish(id) else {
+        // Remembered as ending while the scheduler is still locked, so `logs <n>` always finds it.
+        let finished = {
+            let mut scheduler = self.scheduler();
+            let finished = scheduler.finish(id);
+            if finished.is_some() {
+                self.job_ended(id, Ended::Recording);
+            }
+            finished
+        };
+        let Some(running) = finished else {
             self.never_started(id, &key);
             return;
         };
@@ -224,7 +233,7 @@ impl Daemon {
             id,
             recorded
                 .as_ref()
-                .map_or(Ended::NoRun, |&run| Ended::Run(run)),
+                .map_or(Ended::Unrecorded, |&run| Ended::Run(run)),
         );
         self.events.publish(JobEvent::Finished {
             job: id,

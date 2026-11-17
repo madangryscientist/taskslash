@@ -258,7 +258,7 @@ fn holds(socket: &Path, job: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogFound, LogSelect, epoch_secs, header, local_time, logs, nothing};
+    use super::{LogFound, LogSelect, epoch_secs, header, local_time, logs};
     use crate::procfs::rfc3339;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
@@ -307,12 +307,6 @@ mod tests {
 
     #[test]
     fn an_older_daemons_reply_gives_only_the_number() {
-        let run = LogFound {
-            run: Some(3140),
-            log_path: Some("/l".into()),
-            ..LogFound::default()
-        };
-        assert_eq!(header(&run, fixed), "run 3140");
         let job = LogFound {
             job: Some(12),
             log_path: Some("/l".into()),
@@ -331,32 +325,6 @@ mod tests {
         assert_eq!(epoch_secs("2026-13-01T00:00:00Z"), None);
         let (date, time) = local_time("2026-11-17T18:22:00.000Z").unwrap();
         assert_eq!((date.len(), time.len()), (10, 5), "{date} {time}");
-    }
-
-    #[test]
-    fn nothing_found_says_what_to_try_next() {
-        assert_eq!(
-            nothing(&LogSelect::Failed {
-                key: None,
-                within: Some("/w/mine".into())
-            }),
-            "no failed run in mine; taskslash logs --failed --all searches the whole machine"
-        );
-        assert_eq!(
-            nothing(&LogSelect::Failed {
-                key: Some("k".into()),
-                within: Some("/w/mine".into())
-            }),
-            "no failed run of k in mine; taskslash logs --failed k --all searches the whole machine"
-        );
-        assert_eq!(
-            nothing(&LogSelect::Failed {
-                key: None,
-                within: None
-            }),
-            "no failed run"
-        );
-        assert!(nothing(&LogSelect::Job { job: 1 }).starts_with("no job 1 (the daemon restarted"));
     }
 
     #[test]

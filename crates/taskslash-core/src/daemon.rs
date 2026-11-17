@@ -9,8 +9,7 @@ use crate::launch;
 use crate::logs::{self, Retention};
 use crate::procfs;
 use crate::protocol::{
-    ClientMessage, DaemonMessage, ENDED_JOBS, Kind, Launch, LogFound, LogSelect, Run, Status,
-    receive, send,
+    ClientMessage, DaemonMessage, Kind, Launch, LogFound, LogSelect, Run, Status, receive, send,
 };
 use crate::sampler::{FileSampler, MachineSampler, MachineSnapshot, ProcSampler};
 use crate::scheduler::{Scheduler, lock};
@@ -35,7 +34,7 @@ mod ended;
 mod events;
 mod job;
 
-use ended::{Ended, EndedJobs};
+use ended::{ENDED_JOBS, Ended, EndedJobs};
 
 /// What every connection shares. Lock order: `scheduler` before `store`, never the other way.
 struct Daemon {
@@ -274,10 +273,23 @@ impl Daemon {
             })
         };
         Ok(match select {
+            // A job is remembered as ended before it leaves the scheduler, so asking `held` first
+            // and `ended` second never misses one that ends in between.
             LogSelect::Job { job } => match held(job) {
                 Some(found) => Some(found),
                 None => match self.ended_job(job) {
                     Some(Ended::Run(run)) => recorded(self.store().run(run)?),
+                    Some(Ended::Recording) => {
+                        return Err(Error::new(format!(
+                            "job {job} is ending; ask again in a moment"
+                        )));
+                    }
+                    Some(Ended::Unrecorded) => {
+                        return Err(Error::new(format!(
+                            "job {job} ran, but its run could not be recorded, so its log \
+                             cannot be found by number"
+                        )));
+                    }
                     Some(Ended::NoRun) => Some(LogFound {
                         job: Some(job),
                         never_ran: true,

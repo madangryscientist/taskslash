@@ -3,12 +3,20 @@
 
 use std::collections::BTreeMap;
 
+/// How many ended jobs the daemon remembers.
+pub(super) const ENDED_JOBS: usize = 1000;
+
 /// What became of an ended job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Ended {
     /// It ran and its row is run `id`.
     Run(i64),
-    /// It never ran (it left the queue, or its row was not written), so it has no run to show.
+    /// It ran and its row is being written: remembered before it leaves the scheduler, so a
+    /// `logs <n>` in between finds it.
+    Recording,
+    /// It ran, but its row could not be written.
+    Unrecorded,
+    /// It never ran: it left the queue, or its client went before it started.
     NoRun,
 }
 
