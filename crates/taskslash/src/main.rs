@@ -3,7 +3,9 @@
 //! Exit codes: 0 ok, 1 a failure that is not usage, 2 a usage error. `taskslash run` exits with
 //! its command's code instead. `taskslash history` and `taskslash status` exit 1 when no daemon is
 //! running, as `run` does. `taskslash moon` exits 1 when any target did not pass. `taskslash logs`
-//! exits 1 when the log it names is not there.
+//! exits 1 when the log it names is not there. `taskslash <name>`, for a name that is not a
+//! built-in, runs the plugin `taskslash-<name>` from `PATH` in place of taskslash, so the exit code
+//! is the plugin's; exit 2 when there is none.
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
@@ -12,6 +14,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 use taskslash_core::Error;
 use taskslash_core::admission::waiting_line;
+use taskslash_core::plugin;
 use taskslash_core::protocol::{Class, Kind, LogSelect};
 use text::{estimate_text, status_text, table};
 
@@ -138,6 +141,19 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// List the plugins on PATH: every executable named `taskslash-<name>`.
+    ///
+    /// `taskslash <name> [args...]` runs the first `taskslash-<name>` on PATH in place of taskslash,
+    /// when `<name>` is not a built-in command. One line per name with the path that runs; later
+    /// ones of the same name are listed as shadowed, and a name a built-in has is marked as never
+    /// run.
+    Plugins {
+        /// Print one array of `{"name", "path", "shadowed", "builtin"}`.
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 /// A finite number above 0.
@@ -175,10 +191,58 @@ fn main() -> ExitCode {
     }
 }
 
+/// The names of the built-in commands, `help` included.
+fn builtins() -> Vec<String> {
+    let mut command = Cli::command();
+    command.build();
+    command
+        .get_subcommands()
+        .map(|c| c.get_name().to_owned())
+        .collect()
+}
+
+/// Runs the plugin for `taskslash <name> [args...]`; returns only when it could not be started.
+fn plugin(argv: Vec<OsString>) -> Error {
+    let mut argv = argv.into_iter();
+    let name = argv.next().unwrap_or_default();
+    let args: Vec<OsString> = argv.collect();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(program) = plugin::find(&name, &path) {
+        return plugin::exec(&program, &args);
+    }
+    let name = name.to_string_lossy();
+    let builtins = builtins();
+    let tip = plugin::closest(&name, &builtins)
+        .map(|c| format!("\n\n  tip: a similar subcommand exists: '{c}'"))
+        .unwrap_or_default();
+    let message = format!(
+        "unrecognized subcommand '{name}'{tip}\n\nNo program named {}{name} is on PATH.",
+        plugin::PREFIX
+    );
+    Cli::command()
+        .error(ErrorKind::InvalidSubcommand, message)
+        .exit()
+}
+
 fn dispatch(command: Commands) -> Result<i32, Error> {
-    let socket = taskslash_core::socket_path()?;
+    let socket = taskslash_core::socket_path;
     match command {
-        Commands::Daemon => taskslash_core::serve(&socket, &taskslash_core::db_path()?).map(|()| 0),
+        Commands::External(argv) => Err(plugin(argv)),
+        Commands::Plugins { json } => {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let plugins = plugin::list(&path, &builtins());
+            let text = if json {
+                plugin::list_json(&plugins)
+            } else {
+                plugin::list_text(&plugins)
+            };
+            write!(io::stdout(), "{text}")
+                .map_err(|e| Error::new(format!("cannot write the plugins: {e}")))?;
+            Ok(0)
+        }
+        Commands::Daemon => {
+            taskslash_core::serve(&socket()?, &taskslash_core::db_path()?).map(|()| 0)
+        }
         Commands::Run {
             name,
             kind,
@@ -188,7 +252,7 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
             command,
         } => {
             let demand = taskslash_core::Demand { cpu, mem_mib: mem };
-            taskslash_core::run(&socket, name, kind, class(flag), demand, &command)
+            taskslash_core::run(&socket()?, name, kind, class(flag), demand, &command)
         }
         Commands::Moon {
             targets,
@@ -197,7 +261,7 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
         } => {
             let cwd = std::env::current_dir()
                 .map_err(|e| Error::new(format!("cannot read the current directory: {e}")))?;
-            taskslash_core::moon(&socket, &cwd, &targets, force, class(flag))
+            taskslash_core::moon(&socket()?, &cwd, &targets, force, class(flag))
         }
         Commands::Logs {
             job,
@@ -213,10 +277,10 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
                 (_, _, _, Some(key)) => LogSelect::Failed { key },
                 (None, None, None, None) => return Err(Error::usage("name a job or a run")),
             };
-            taskslash_core::logs(&socket, &select, follow, &mut io::stdout().lock()).map(|()| 0)
+            taskslash_core::logs(&socket()?, &select, follow, &mut io::stdout().lock()).map(|()| 0)
         }
         Commands::Why { job, json } => {
-            let text = match (taskslash_core::why(&socket, job)?, json) {
+            let text = match (taskslash_core::why(&socket()?, job)?, json) {
                 (Some((reason, _, _)), true) => taskslash_core::protocol::reason_json(&reason),
                 (Some((reason, waited_s, position)), false) => {
                     let line = waiting_line(&reason, waited_s, position);
@@ -230,7 +294,7 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
             Ok(0)
         }
         Commands::History { key, json } => {
-            let (estimate, runs) = taskslash_core::history(&socket, &key)?;
+            let (estimate, runs) = taskslash_core::history(&socket()?, &key)?;
             let text = if json {
                 taskslash_core::protocol::history_json(&estimate, &runs)
             } else {
@@ -241,7 +305,7 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
             Ok(0)
         }
         Commands::Status { json } => {
-            let status = taskslash_core::status(&socket)?;
+            let status = taskslash_core::status(&socket()?)?;
             let text = if json {
                 taskslash_core::protocol::status_json(status)
             } else {
