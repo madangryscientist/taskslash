@@ -112,6 +112,76 @@ fn a_target_that_is_malformed_or_matches_nothing_is_a_usage_error() {
     }
 }
 
+/// The hint line under `<target> matches no task`.
+fn hint(tasks: &[Task], requested: &str) -> String {
+    let e = graph(tasks, &[requested.to_owned()]).unwrap_err();
+    assert!(e.is_usage(), "{e}");
+    let text = e.to_string();
+    let (first, rest) = text.split_once('\n').expect("a hint line");
+    assert_eq!(first, format!("{requested} matches no task"));
+    rest.to_owned()
+}
+
+#[test]
+fn a_target_that_matches_nothing_lists_what_exists() {
+    let tasks = [
+        task("cli:test", &[]),
+        task("cli:lint", &[]),
+        task("web:test", &[]),
+        task("web:build", &[]),
+    ];
+    assert_eq!(
+        hint(&tasks, "nosuch:test"),
+        "  projects with test: cli, web"
+    );
+    assert_eq!(hint(&tasks, "cli:nosuch"), "  tasks in cli: lint, test");
+    assert_eq!(hint(&tasks, ":nosuch"), "  tasks: build, lint, test");
+
+    let many: Vec<Task> = (0..15)
+        .map(|i| task(&format!("p{i:02}:test"), &[]))
+        .collect();
+    assert_eq!(
+        hint(&many, "nosuch:test"),
+        "  projects with test: p00, p01, p02, p03, p04, p05, p06, p07, p08, p09, p10, p11, \
+         and 3 more"
+    );
+}
+
+#[test]
+fn no_moon_says_to_install_first() {
+    let base = std::env::temp_dir().join(format!("tks-nomoon-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+    let e = moon_binary_on(&base, Some(base.clone().into_os_string())).unwrap_err();
+    assert!(!e.is_usage(), "{e}");
+    assert!(
+        e.to_string()
+            .ends_with("; run your package manager's install (bun install) first"),
+        "{e}"
+    );
+    assert!(moon_binary_on(&base, None).is_err());
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_moon_target_resolves_to_its_key_only_inside_a_workspace() {
+    let base = std::env::temp_dir().join(format!("tks-tkey-{}", std::process::id()));
+    let shop = base.join("shop");
+    fs::create_dir_all(shop.join(".moon")).unwrap();
+    fs::write(shop.join(WORKSPACE_FILE), "projects: {}\n").unwrap();
+    fs::create_dir_all(shop.join("apps/cli")).unwrap();
+
+    let inside = shop.join("apps/cli");
+    assert_eq!(
+        target_key(&inside, "cli:test").as_deref(),
+        Some("shop/cli:test")
+    );
+    for not_a_target in ["shop/cli:test", "cli", ":test", "cli:", "a:b:c", "bun test"] {
+        assert_eq!(target_key(&inside, not_a_target), None, "{not_a_target}");
+    }
+    assert_eq!(target_key(&base, "cli:test"), None, "outside a workspace");
+    fs::remove_dir_all(&base).unwrap();
+}
+
 #[test]
 fn a_cycle_is_an_error_not_a_hang() {
     let tasks = [

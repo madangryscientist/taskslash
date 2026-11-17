@@ -7,6 +7,7 @@ use crate::protocol::Kind;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,22 +22,27 @@ pub fn find_root(cwd: &Path) -> Option<&Path> {
 
 /// `<root>/node_modules/.bin/moon` when it exists, else `moon` on `PATH`.
 pub fn moon_binary(root: &Path) -> Result<PathBuf, Error> {
+    moon_binary_on(root, env::var_os("PATH"))
+}
+
+/// `moon_binary` with `path` as `PATH`.
+fn moon_binary_on(root: &Path, path: Option<OsString>) -> Result<PathBuf, Error> {
     let local = root.join("node_modules/.bin/moon");
     if local.is_file() {
         return Ok(local);
     }
-    env::var_os("PATH")
-        .and_then(|path| {
-            env::split_paths(&path)
-                .map(|dir| dir.join("moon"))
-                .find(|moon| moon.is_file())
-        })
-        .ok_or_else(|| {
-            Error::new(format!(
-                "no moon: neither {} nor moon on PATH",
-                local.display()
-            ))
-        })
+    path.and_then(|path| {
+        env::split_paths(&path)
+            .map(|dir| dir.join("moon"))
+            .find(|moon| moon.is_file())
+    })
+    .ok_or_else(|| {
+        Error::new(format!(
+            "no moon: neither {} nor moon on PATH; run your package manager's install \
+                 (bun install) first",
+            local.display()
+        ))
+    })
 }
 
 /// The repository's name, the same for every worktree of it: the basename of `root` in a clone
@@ -57,6 +63,61 @@ pub fn repo_name(root: &Path) -> String {
         || main.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+/// The key `taskslash moon` records `key` under when `key` looks like a moon target
+/// (`<project>:<task>`, both named, no `/`) and `cwd` is inside a moon workspace:
+/// `<repo>/<project>:<task>`. `None` otherwise.
+pub fn target_key(cwd: &Path, key: &str) -> Option<String> {
+    let (project, task) = key.split_once(':')?;
+    let looks = !project.is_empty()
+        && !task.is_empty()
+        && !task.contains(':')
+        && !key.contains('/')
+        && !key.contains(char::is_whitespace);
+    looks.then_some(())?;
+    Some(format!("{}/{key}", repo_name(find_root(cwd)?)))
+}
+
+/// At most 12 of `names`, comma separated, then `and N more` for the rest.
+fn capped(names: &[&str]) -> String {
+    const SHOWN: usize = 12;
+    let mut text = names
+        .iter()
+        .take(SHOWN)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > SHOWN {
+        text.push_str(&format!(", and {} more", names.len() - SHOWN));
+    }
+    text
+}
+
+/// What exists, for a target `<project>:<task>` (`project` empty for `:<task>`) that matches
+/// nothing: the projects that have `task`, else the tasks `project` has, else every task name.
+fn no_match_hint(tasks: &[Task], project: &str, task: &str) -> String {
+    let with_task: BTreeSet<&str> = tasks
+        .iter()
+        .filter(|t| t.task == task)
+        .map(|t| t.project.as_str())
+        .collect();
+    if !with_task.is_empty() {
+        let names: Vec<&str> = with_task.into_iter().collect();
+        return format!("projects with {task}: {}", capped(&names));
+    }
+    let of_project: BTreeSet<&str> = tasks
+        .iter()
+        .filter(|t| t.project == project)
+        .map(|t| t.task.as_str())
+        .collect();
+    if !of_project.is_empty() {
+        let names: Vec<&str> = of_project.into_iter().collect();
+        return format!("tasks in {project}: {}", capped(&names));
+    }
+    let all: BTreeSet<&str> = tasks.iter().map(|t| t.task.as_str()).collect();
+    let names: Vec<&str> = all.into_iter().collect();
+    format!("tasks: {}", capped(&names))
 }
 
 /// The cost class of a moon task, by its name.
@@ -147,7 +208,10 @@ pub fn graph(tasks: &[Task], requested: &[String]) -> Result<Vec<Node>, Error> {
             wanted.insert(t.target.as_str());
         }
         if !matched {
-            return Err(Error::usage(format!("{target} matches no task")));
+            return Err(Error::usage(format!(
+                "{target} matches no task\n  {}",
+                no_match_hint(tasks, project, task)
+            )));
         }
     }
 

@@ -1,6 +1,6 @@
 # TaskSlash facts
 
-Checked against main at 2d71401 on 2026-11-17.
+Checked against main at 86650f8 on 2026-11-17.
 
 ## What it is
 TaskSlash stops builds and tests that start at the same time from overloading one computer: each one waits in a queue until your computer has capacity for it. It is early (alpha), version 0.1.0.
@@ -13,9 +13,9 @@ TaskSlash stops builds and tests that start at the same time from overloading on
 - `measured-runs`: With a systemd user session, each job runs in its own systemd scope and the daemon records its wall time, CPU, peak memory, disk writes and exit code in a SQLite database.
 - `priority-classes`: A job has a priority class (urgent, flake, interactive, normal, background), and within a class the worktree using the least of the machine goes first.
 - `waiting-reason`: A job that waits says why on stderr, and `taskslash why <job>` prints the same reason, also as JSON.
-- `moon-targets`: `taskslash moon <targets>` runs moon targets as one job per target, each once, after its dependencies passed.
+- `moon-targets`: `taskslash moon <targets>` runs moon targets as one job per target, each once, after its dependencies passed, and ends with a line per target naming the key its run is recorded under and, for a failed target, the command that prints its log; a target that matches nothing lists the projects or tasks that do exist.
 - `job-logs`: Every job's output is kept in a log file of its own until it passes a set age or the logs pass a set size, and `taskslash logs` prints it, by job, run, name or the last failure.
-- `history`: `taskslash history` lists every job name with runs, and `taskslash history <name>` prints a job's estimate and what its last runs cost and where they ran; an unknown name exits 1 and suggests names like it.
+- `history`: `taskslash history` lists every job name with runs, and `taskslash history <name>` prints a job's estimate and what its last runs cost and where they ran; an unknown name exits 1 and suggests names like it. Inside a moon workspace, `taskslash history <project>:<task>` finds that target's runs under the repository's name.
 - `status`: `taskslash status` shows the machine's load, pressure, memory, disks and the running and waiting jobs, also as JSON.
 - `top`: `taskslash top` shows the machine's load and pressure, the running and waiting jobs, the jobs finished since it opened, and the selected job's output on one live terminal screen.
 - `events`: `taskslash events` prints one JSON line per job queued, started and finished, for other tools to follow.

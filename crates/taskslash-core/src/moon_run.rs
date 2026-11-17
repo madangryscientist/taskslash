@@ -95,7 +95,7 @@ pub fn moon(
     let mut out = io::stdout().lock();
     let mut text = String::from("\n");
     for (node, end) in nodes.iter().zip(&ends) {
-        text.push_str(&summary_line(&node.target, end));
+        text.push_str(&summary_line(&node.target, &key(&repo, node), end));
     }
     out.write_all(text.as_bytes())
         .and_then(|()| out.flush())
@@ -118,14 +118,24 @@ fn gate_path(root: &Path, inherited: Option<OsString>) -> Option<OsString> {
     env::join_paths(dirs).ok()
 }
 
-/// `<target> <pass|fail|skipped> <wall>[ cached]`, a newline.
-fn summary_line(target: &str, end: &End) -> String {
+/// The key a node's job is recorded under: `<repo>/<target>`.
+fn key(repo: &str, node: &Node) -> String {
+    format!("{repo}/{}", node.target)
+}
+
+/// `<target> <pass|fail|skipped> <wall>[ cached] [<key>]`, a newline, and after a failure the
+/// command that prints its log: `  log: taskslash logs --last <key>`.
+fn summary_line(target: &str, key: &str, end: &End) -> String {
     let wall = match end.state {
         State::Skipped => "-".to_owned(),
         _ => format!("{:.1}s", end.wall.as_secs_f64()),
     };
     let cached = if end.cached { " cached" } else { "" };
-    format!("{target} {} {wall}{cached}\n", end.state.as_str())
+    let mut line = format!("{target} {} {wall}{cached} [{key}]\n", end.state.as_str());
+    if end.state == State::Fail {
+        line.push_str(&format!("  log: taskslash logs --last {key}\n"));
+    }
+    line
 }
 
 /// Runs each node once on a thread of its own, as soon as every node it depends on has passed,
@@ -202,7 +212,7 @@ fn run_node(
         argv.push("--force".into());
     }
     let job = Job {
-        name: Some(format!("{repo}/{}", node.target)),
+        name: Some(key(repo, node)),
         kind: moon::kind(&node.task),
         class,
         demand: Demand::default(),
