@@ -1,6 +1,7 @@
 //! One job's connection: queued, started, measured and recorded.
 
 use super::Daemon;
+use super::ended::Ended;
 use crate::admission::{Reason, ordinal};
 use crate::estimate::{Source, estimate};
 use crate::logs;
@@ -219,6 +220,12 @@ impl Daemon {
             log_path: Some(&log),
         };
         let recorded = self.store().record(&finished);
+        self.job_ended(
+            id,
+            recorded
+                .as_ref()
+                .map_or(Ended::NoRun, |&run| Ended::Run(run)),
+        );
         self.events.publish(JobEvent::Finished {
             job: id,
             key: key.clone(),
@@ -246,6 +253,7 @@ impl Daemon {
 impl Daemon {
     /// The `finished` of a job that leaves before it runs, so every `queued` has one.
     fn never_started(&self, id: u64, key: &str) {
+        self.job_ended(id, Ended::NoRun);
         self.events.publish(JobEvent::Finished {
             job: id,
             key: key.to_owned(),

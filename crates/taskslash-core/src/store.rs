@@ -77,6 +77,15 @@ const RUN_COLUMNS: &str = "id, key, kind, argv, cwd, launch, started_at, wall_ms
     peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code, machine_cpu_some, machine_mem_some,
     machine_io_some, class, submitter, cached, moon_hash, log_path";
 
+/// A run's submitter is the parameter `within` (`?2` or `?3`), or ends in `/<within>`, or `within`
+/// is null. [`protocol::submitted_from`](crate::protocol::submitted_from) in SQL.
+const WITHIN_2: &str = "(?2 IS NULL OR submitter = ?2
+    OR (length(submitter) > length(?2)
+        AND substr(submitter, length(submitter) - length(?2)) = '/' || ?2))";
+const WITHIN_3: &str = "(?3 IS NULL OR submitter = ?3
+    OR (length(submitter) > length(?3)
+        AND substr(submitter, length(submitter) - length(?3)) = '/' || ?3))";
+
 pub struct Store {
     conn: Connection,
 }
@@ -199,10 +208,7 @@ impl Store {
         let mut statement = self
             .conn
             .prepare(&format!(
-                "SELECT {RUN_COLUMNS} FROM runs WHERE key = ?1
-                    AND (?3 IS NULL OR submitter = ?3
-                        OR (length(submitter) > length(?3)
-                            AND substr(submitter, length(submitter) - length(?3)) = '/' || ?3))
+                "SELECT {RUN_COLUMNS} FROM runs WHERE key = ?1 AND {WITHIN_3}
                  ORDER BY started_at DESC, id DESC LIMIT ?2"
             ))
             .map_err(sql)?;
@@ -262,16 +268,22 @@ impl Store {
         )
     }
 
-    /// The newest run, of `key` when given, whose exit code is set and not 0. A run whose client
-    /// went away has no exit code and does not count.
-    pub fn last_failed(&self, key: Option<&str>) -> Result<Option<Run>, Error> {
+    /// The newest run, of `key` when given, whose exit code is set and not 0; with `within`, only
+    /// the runs submitted from there, matched as `history` matches it. A run whose client went
+    /// away has no exit code and does not count.
+    pub fn last_failed(
+        &self,
+        key: Option<&str>,
+        within: Option<&str>,
+    ) -> Result<Option<Run>, Error> {
         self.one(
             &format!(
                 "SELECT {RUN_COLUMNS} FROM runs
                  WHERE exit_code IS NOT NULL AND exit_code != 0 AND (?1 IS NULL OR key = ?1)
+                    AND {WITHIN_2}
                  ORDER BY started_at DESC, id DESC LIMIT 1"
             ),
-            params![key],
+            params![key, within],
         )
     }
 

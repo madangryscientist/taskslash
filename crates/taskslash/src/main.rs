@@ -132,13 +132,14 @@ enum Commands {
     /// Print a job's or a run's log: everything its command wrote, stdout and stderr together.
     ///
     /// `taskslash run` and `taskslash moon` copy each job's output into a log of its own beside the
-    /// database (`TASKSLASH_LOGS` overrides the directory). The log goes to stdout unchanged.
+    /// database (`TASKSLASH_LOGS` overrides the directory). The log goes to stdout unchanged, after
+    /// one line on stderr naming the run or job, its key, worktree, exit code and start time.
     /// Exits 1 when there is no such job or run, when the run was recorded before logs were kept,
     /// or when its log has expired (the daemon deletes logs of jobs that ended over
     /// `TASKSLASH_LOG_DAYS` ago, 7 by default, and the oldest ones past `TASKSLASH_LOG_MIB`, 1024).
     #[command(group(ArgGroup::new("pick").required(true)))]
     Logs {
-        /// A running job's number, as `status` shows it.
+        /// A job's number, as `status` shows it: running, or ended since the daemon started.
         #[arg(group = "pick")]
         job: Option<u64>,
         /// A finished run, by the id `history` shows.
@@ -147,9 +148,13 @@ enum Commands {
         /// The newest run of a key, running or not.
         #[arg(long, value_name = "KEY", group = "pick")]
         last: Option<String>,
-        /// The newest run (of a key, when given) that exited with a code other than 0.
+        /// The newest run (of a key, when given) that exited with a code other than 0, submitted
+        /// from this worktree (the nearest directory above here with a `.git`).
         #[arg(long, value_name = "KEY", num_args = 0..=1, group = "pick")]
         failed: Option<Option<String>>,
+        /// With `--failed`: search the runs of the whole machine, not only this worktree's.
+        #[arg(long)]
+        all: bool,
         /// Follow a running job's log until the job ends.
         #[arg(short, long)]
         follow: bool,
@@ -409,16 +414,41 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
             run,
             last,
             failed,
+            all,
             follow,
         } => {
+            if all && failed.is_none() {
+                return Err(Error::usage("--all goes with --failed"));
+            }
             let select = match (job, run, last, failed) {
                 (Some(job), ..) => LogSelect::Job { job },
                 (_, Some(run), ..) => LogSelect::Run { run },
                 (_, _, Some(key), _) => LogSelect::Last { key },
-                (_, _, _, Some(key)) => LogSelect::Failed { key },
+                (_, _, _, Some(key)) => {
+                    let within = if all {
+                        None
+                    } else {
+                        let cwd = std::env::current_dir().map_err(|e| {
+                            Error::new(format!("cannot read the current directory: {e}"))
+                        })?;
+                        Some(
+                            taskslash_core::submitter(&cwd)
+                                .to_string_lossy()
+                                .into_owned(),
+                        )
+                    };
+                    LogSelect::Failed { key, within }
+                }
                 (None, None, None, None) => return Err(Error::usage("name a job or a run")),
             };
-            taskslash_core::logs(&socket()?, &select, follow, &mut io::stdout().lock()).map(|()| 0)
+            taskslash_core::logs(
+                &socket()?,
+                &select,
+                follow,
+                &mut io::stdout().lock(),
+                &mut io::stderr().lock(),
+            )
+            .map(|()| 0)
         }
         Commands::Why { job, json } => {
             let text = match (taskslash_core::why(&socket()?, job)?, json) {
