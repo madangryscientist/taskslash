@@ -75,18 +75,15 @@ pub fn list(path: &OsStr, builtins: &[String]) -> Vec<Plugin> {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
-        let mut here: Vec<(String, PathBuf)> = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let file = entry.file_name();
-                let name = file.to_str()?.strip_prefix(PREFIX)?.to_owned();
-                let path = entry.path();
-                (!name.is_empty() && executable(&path)).then_some((name, path))
-            })
-            .collect();
-        here.sort();
-        for (name, path) in here {
-            found.entry(name).or_default().push(path);
+        for entry in entries.filter_map(Result::ok) {
+            let file = entry.file_name();
+            let Some(name) = file.to_str().and_then(|f| f.strip_prefix(PREFIX)) else {
+                continue;
+            };
+            let path = entry.path();
+            if !name.is_empty() && executable(&path) {
+                found.entry(name.to_owned()).or_default().push(path);
+            }
         }
     }
     found
@@ -103,34 +100,15 @@ pub fn list(path: &OsStr, builtins: &[String]) -> Vec<Plugin> {
         .collect()
 }
 
-/// The candidate closest to `name` by edit distance, when it is within a third of the name's
-/// length (at least 1): what a typo of a built-in most likely meant.
+/// The candidate most like `name`, when it is like enough: clap's own rule for the "a similar
+/// subcommand exists" tip (Jaro similarity above 0.7), which an external subcommand bypasses.
 pub fn closest<'a>(name: &str, candidates: &'a [String]) -> Option<&'a str> {
-    let limit = (name.chars().count() / 3).max(1);
     candidates
         .iter()
-        .map(|c| (distance(name, c), c.as_str()))
-        .filter(|(d, _)| *d <= limit)
-        .min_by_key(|(d, _)| *d)
+        .map(|c| (strsim::jaro(name, c), c.as_str()))
+        .filter(|(score, _)| *score > 0.7)
+        .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, c)| c)
-}
-
-/// The Levenshtein distance between `a` and `b`, by characters.
-fn distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let next = (diagonal + usize::from(ca != *cb))
-                .min(row[j] + 1)
-                .min(row[j + 1] + 1);
-            diagonal = row[j + 1];
-            row[j + 1] = next;
-        }
-    }
-    row[b.len()]
 }
 
 /// One line per plugin: `<name>  <path>`, then what shadows or blocks it.
@@ -271,8 +249,7 @@ mod tests {
     fn closest_names_a_near_builtin_and_nothing_far() {
         let builtins: Vec<String> = ["status", "run", "logs"].map(String::from).into();
         assert_eq!(closest("stauts", &builtins), Some("status"));
-        assert_eq!(closest("rum", &builtins), Some("run"));
+        assert_eq!(closest("stat", &builtins), Some("status"));
         assert_eq!(closest("bench", &builtins), None);
-        assert_eq!(distance("kitten", "sitting"), 3);
     }
 }

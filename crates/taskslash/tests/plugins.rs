@@ -164,6 +164,12 @@ fn an_unknown_name_is_a_usage_error_naming_the_program() {
         "{err}"
     );
     assert!(err.contains("taskslash-stauts"), "{err}");
+    let out = taskslash(&[&bin], &["hist"], &[]).output().unwrap();
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("a similar subcommand exists: 'history'"),
+        "{err}"
+    );
 }
 
 #[test]
