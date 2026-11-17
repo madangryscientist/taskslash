@@ -146,13 +146,13 @@ fn a_builtin_is_never_sent_to_a_plugin_of_the_same_name() {
 fn an_unknown_name_is_a_usage_error_naming_the_program() {
     let tmp = Dir::new("unknown");
     let bin = tmp.sub("bin");
-    // Named taskslash-nope but not executable, so it does not count.
-    script(&bin.join("taskslash-nope"), "exit 0", 0o644);
-    let out = taskslash(&[&bin], &["nope", "a"], &[]).output().unwrap();
+    // Named taskslash-xyzzy but not executable, so it does not count.
+    script(&bin.join("taskslash-xyzzy"), "exit 0", 0o644);
+    let out = taskslash(&[&bin], &["xyzzy", "a"], &[]).output().unwrap();
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     let err = text(&out.stderr);
-    assert!(err.contains("unrecognized subcommand 'nope'"), "{err}");
-    assert!(err.contains("taskslash-nope"), "{err}");
+    assert!(err.contains("unrecognized subcommand 'xyzzy'"), "{err}");
+    assert!(err.contains("taskslash-xyzzy"), "{err}");
     assert!(!err.contains("tip:"), "{err}");
 
     // A typo of a built-in still gets the tip.

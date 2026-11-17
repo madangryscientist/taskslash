@@ -28,6 +28,7 @@ taskslash history gate                    # the estimate of "gate", then what it
 taskslash history gate --json             # the same, as {"estimate": ..., "runs": [...]}
 taskslash status                          # is this machine busy, and with what
 taskslash status --json                   # the same, as one line of JSON
+taskslash top                             # the machine, the jobs and their output, live
 taskslash logs 7                          # what running job 7 has printed so far
 taskslash logs 7 -f                       # the same, followed until it ends
 taskslash logs --last gate                # the newest run of "gate", running or not
@@ -39,7 +40,7 @@ taskslash plugins                         # the plugins on PATH (below)
 `taskslash run` runs the command itself, in your directory, with your environment and terminal, and
 exits with its exit code (128+N when signal N killed it, 127 when it cannot be started). With no
 daemon running it does not run the command and exits 1; so do `taskslash history`,
-`taskslash status`, `taskslash why`, `taskslash logs` and `taskslash events`.
+`taskslash status`, `taskslash why`, `taskslash logs`, `taskslash events` and `taskslash top`.
 
 ### Every job's output is kept
 
@@ -286,6 +287,43 @@ line): ...` for a job whose class waiting has raised).
 | `waiting[]` | each waiting job, in the order of the last pass: `job`, `key`, `kind`, `class`, `effective_class` (only when waiting has raised it), `submitter`, `waited_s`, `position` (1-based), `reason` (the sentence), `why` (the reason object) and its `estimate` |
 
 Shares and rates are 0 in the first second after the daemon starts, before there are two readings.
+
+### taskslash top
+
+`taskslash top` puts what `status`, `why` and `logs --follow` say on one screen, live:
+
+```
+cpu 35% busy on 12 threads, pressure 14.94   load 7.25 4.14 3.94
+mem 11.1 of 31.3 GiB used, 64% available, pressure 0.09   io some 1.04 full 0.53
+┌ jobs ────────────────────────────────────────────────────┐┌ job 110 web:test: running ───────┐
+│  110 running            normal      repo.wt-1  web:test  ││ RUN  src/app.test.ts             │
+│  111 waiting 1st 4s     background  repo.wt-2  e2e       ││ ✓ renders the list (12 ms)       │
+│  112 exit 3 4s          normal      repo.wt-1  lint      ││                                  │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────┘
+q quit   up/down or j/k select
+```
+
+- **The strip** on top: CPU busy and the threads jobs may use, CPU pressure, the load average;
+  memory used of total and the share available, memory pressure, and IO pressure (`some` and
+  `full`). All pressures are `some avg10` unless named, in percent. It refreshes once a second.
+- **The job list** on the left: the running jobs, then the waiting ones in queue order (place in
+  line and time waited), then the jobs that finished, newest first (exit code, wall time, `cached`
+  when moon replayed it, or `never started`). Each row has the job number, its state, class, the
+  submitting worktree's directory name and the key.
+- **The output pane** on the right: the selected job's log, as many of its last lines as fit,
+  following new output as it is written. Colours, cursor moves and other control characters are
+  removed, so a job cannot scramble the screen. A waiting job shows why it waits; a job that left
+  the queue before it was admitted shows `never started`.
+
+Keys: up and down, or `j` and `k`, move the selection, which stays on the same job as the list
+changes. `q`, Esc or Ctrl-C quit and give the terminal back.
+
+The finished jobs are the ones that finished **since top opened**, at most 50: top follows the
+daemon's events and asks for no history when it starts. A line at the bottom says when it missed
+events because it read them too slowly, or when the daemon stops answering (top keeps trying).
+
+`top` exits 1 with the message `status` prints when no daemon answers, and 2 when stdout is not a
+terminal.
 
 ### Plugins
 
