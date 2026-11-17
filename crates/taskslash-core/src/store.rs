@@ -215,13 +215,17 @@ impl Store {
     }
 
     /// Every key with runs, the most recently run first: how many, and the newest run's start,
-    /// exit code and submitter. (SQLite takes a bare column from the row `MAX` picked.)
+    /// exit code and submitter. The newest run is the one `history` puts first.
     pub fn keys(&self) -> Result<Vec<KeySummary>, Error> {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT key, COUNT(*), MAX(started_at), exit_code, submitter
-                 FROM runs GROUP BY key ORDER BY 3 DESC, key",
+                "SELECT key, runs, started_at, exit_code, submitter FROM (
+                    SELECT key, started_at, exit_code, submitter,
+                        COUNT(*) OVER (PARTITION BY key) AS runs,
+                        ROW_NUMBER() OVER (PARTITION BY key ORDER BY started_at DESC, id DESC) AS n
+                    FROM runs)
+                 WHERE n = 1 ORDER BY started_at DESC, key",
             )
             .map_err(sql)?;
         statement

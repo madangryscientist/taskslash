@@ -148,7 +148,17 @@ fn suggestions_are_substring_matches_first_then_the_closest_names() {
         ["shop/web:test", "shop/web:build"],
         "case-insensitive substring, in the keys' order"
     );
-    assert_eq!(suggest("gaet", &keys), ["gate", "gates"], "closest by Jaro");
+    assert_eq!(
+        suggest("GAET", &keys),
+        ["gate", "gates"],
+        "else closest by Jaro, any case"
+    );
+    let near: Vec<String> = ["gate", "late"].into_iter().map(String::from).collect();
+    assert_eq!(
+        suggest("gat", &near),
+        ["gate"],
+        "no Jaro once a key contains it"
+    );
     assert_eq!(
         suggest("shop", &keys),
         ["shop/web:test", "shop/api:test", "shop/web:build"]
@@ -156,29 +166,6 @@ fn suggestions_are_substring_matches_first_then_the_closest_names() {
     assert!(suggest("zzzzzz", &keys).is_empty());
     let many: Vec<String> = (0..9).map(|n| format!("job{n}")).collect();
     assert_eq!(suggest("job", &many).len(), 5, "at most five");
-}
-
-#[test]
-fn keys_json_adds_the_worktree() {
-    let keys = [KeySummary {
-        key: "k".into(),
-        runs: 2,
-        last_started_at: "2026-11-17T00:00:00.000Z".into(),
-        last_exit_code: Some(0),
-        last_submitter: "/home/me/dev/shop".into(),
-    }];
-    let value: serde_json::Value = serde_json::from_str(&keys_json(&keys)).unwrap();
-    assert_eq!(
-        value,
-        serde_json::json!([{
-            "key": "k",
-            "runs": 2,
-            "last_started_at": "2026-11-17T00:00:00.000Z",
-            "last_exit_code": 0,
-            "last_submitter": "/home/me/dev/shop",
-            "worktree": "shop"
-        }])
-    );
 }
 
 #[test]

@@ -383,24 +383,26 @@ pub fn keys_json(keys: &[KeySummary]) -> String {
 }
 
 /// Up to five of `keys` that `text` may have meant: those containing it (ignoring case) in their
-/// order, then the closest by Jaro similarity above 0.7, without repeats.
+/// order, else the closest by Jaro similarity above 0.7 (ignoring case), best first.
 pub fn suggest<'a>(text: &str, keys: &'a [String]) -> Vec<&'a str> {
     const MAX: usize = 5;
     let lower = text.to_lowercase();
-    let mut out: Vec<&str> = keys
+    let containing: Vec<&str> = keys
         .iter()
         .filter(|k| k.to_lowercase().contains(&lower))
         .map(String::as_str)
         .take(MAX)
         .collect();
+    if !containing.is_empty() {
+        return containing;
+    }
     let mut near: Vec<(f64, &str)> = keys
         .iter()
-        .map(|k| (strsim::jaro(text, k), k.as_str()))
-        .filter(|(score, k)| *score > 0.7 && !out.contains(k))
+        .map(|k| (strsim::jaro(&lower, &k.to_lowercase()), k.as_str()))
+        .filter(|(score, _)| *score > 0.7)
         .collect();
     near.sort_by(|a, b| b.0.total_cmp(&a.0));
-    out.extend(near.into_iter().map(|(_, k)| k).take(MAX - out.len()));
-    out
+    near.into_iter().map(|(_, k)| k).take(MAX).collect()
 }
 
 /// `{"estimate":...,"runs":[...]}`, pretty, and a newline, as `taskslash history --json` prints it.

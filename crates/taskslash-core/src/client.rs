@@ -231,6 +231,11 @@ pub fn history(
     limit: usize,
     within: Option<&str>,
 ) -> Result<(Estimate, Vec<Run>), Error> {
+    // A shell completes a directory with a trailing `/`; `/` alone stays.
+    let within = within.map(|w| match w.trim_end_matches('/') {
+        "" => "/",
+        trimmed => trimmed,
+    });
     let mut daemon = Connection::open(socket)?;
     match daemon.ask(&ClientMessage::History {
         key: key.to_owned(),

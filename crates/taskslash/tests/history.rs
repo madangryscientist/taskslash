@@ -282,9 +282,26 @@ fn plain_history_prints_a_header_and_a_line_per_run() {
         ]
     );
     // Newest first; `-` in `cached` for a run that is not a moon target's; then the worktree.
-    let dir = daemon.scratch.dir.file_name().unwrap().to_string_lossy();
+    let dir = shown(&daemon.scratch);
     assert!(lines[3].ends_with(&format!(" 3       -  {dir}")), "{text}");
     assert!(lines[4].ends_with(&format!(" 0       -  {dir}")), "{text}");
+}
+
+/// The scratch directory's name as the `where` column shows it: cut to `..` and its last 10
+/// characters past 12 (a 7 digit pid makes it 13).
+fn shown(scratch: &Scratch) -> String {
+    let name = scratch
+        .dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= 12 {
+        name
+    } else {
+        format!("..{}", chars[chars.len() - 10..].iter().collect::<String>())
+    }
 }
 
 fn ok(out: &Output) {
@@ -336,7 +353,8 @@ fn history_with_no_key_lists_the_keys_newest_first() {
     assert_eq!(keys[0]["key"], "gamma");
     assert_eq!(keys[0]["runs"], 1);
     assert_eq!(keys[0]["last_exit_code"], 5);
-    assert_eq!(keys[0]["worktree"], &*dir);
+    let name = daemon.scratch.dir.file_name().unwrap().to_string_lossy();
+    assert_eq!(keys[0]["worktree"], &*name, "JSON keeps the whole name");
     assert_eq!(keys[1]["key"], "alpha");
     assert_eq!(keys[1]["runs"], 2);
     assert!(

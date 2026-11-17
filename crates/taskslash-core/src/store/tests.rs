@@ -221,6 +221,8 @@ fn keys_are_newest_first_with_counts_and_the_newest_runs_exit_and_submitter() {
     store.record(&at("new", "/w/a", &argv, 2_000, 0)).unwrap();
     store.record(&at("new", "/w/b", &argv, 5_000, 3)).unwrap();
     store.record(&at("new", "/w/a", &argv, 4_000, 0)).unwrap();
+    store.record(&at("mid", "/w/x", &argv, 3_000, 9)).unwrap();
+    // Same start: the later row is the newest, as `history` orders them.
     store.record(&at("mid", "/w/c", &argv, 3_000, 1)).unwrap();
     let keys = store.keys().unwrap();
     let got: Vec<(&str, u64, Option<i32>, &str)> = keys
@@ -238,7 +240,7 @@ fn keys_are_newest_first_with_counts_and_the_newest_runs_exit_and_submitter() {
         got,
         [
             ("new", 3, Some(3), "/w/b"),
-            ("mid", 1, Some(1), "/w/c"),
+            ("mid", 2, Some(1), "/w/c"),
             ("old", 1, Some(0), "/w/a"),
         ]
     );
