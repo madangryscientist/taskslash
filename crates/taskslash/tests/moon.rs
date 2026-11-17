@@ -1,7 +1,7 @@
 //! `taskslash moon` through a real daemon and the repo's own moon, on a copy of the fixture
 //! workspace in `tests/fixtures/moon`: `a:gen` (cache off) appends a line to `a/gen.log` and both
 //! `a:typecheck` and `a:test` depend on it; `b:test` passes, `b:typecheck` fails and `b:lint`
-//! depends on it.
+//! depends on it. `b:test` writes `b-test-out` to stdout and `b-test-err` to stderr.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -213,4 +213,39 @@ fn outside_a_workspace_or_with_a_bad_target_is_a_usage_error() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stderr).contains("no moon workspace"));
+}
+
+#[test]
+fn each_targets_stdout_and_stderr_land_in_its_own_log() {
+    let daemon = Scratch::new().daemon();
+    let out = daemon.scratch.taskslash(&["moon", "b:test", "b:typecheck"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    // Passed through to the caller's matching streams.
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("b-test-out"),
+        "{out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("b-test-err"),
+        "{out:?}"
+    );
+    let log = |target: &str| {
+        let out = daemon
+            .scratch
+            .taskslash(&["history", &format!("fixture/{target}"), "--json"]);
+        let history: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let path = history["runs"][0]["log_path"].as_str().unwrap().to_owned();
+        assert!(
+            Path::new(&path).starts_with(daemon.scratch.dir.join("logs")),
+            "{path}"
+        );
+        (path.clone(), fs::read_to_string(&path).unwrap())
+    };
+    let (test_path, test_log) = log("b:test");
+    let (typecheck_path, typecheck_log) = log("b:typecheck");
+    assert_ne!(test_path, typecheck_path);
+    assert!(test_log.contains("b-test-out"), "{test_log}");
+    assert!(test_log.contains("b-test-err"), "{test_log}");
+    assert!(!typecheck_log.contains("b-test"), "{typecheck_log}");
+    assert!(typecheck_log.contains("b:typecheck"), "{typecheck_log}");
 }

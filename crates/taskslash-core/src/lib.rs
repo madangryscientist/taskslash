@@ -15,10 +15,12 @@
 //! gave) fits under the budget beside what is committed. A waiting job is told why.
 
 pub mod admission;
+mod capture;
 mod client;
 mod daemon;
 pub mod estimate;
 mod launch;
+mod logs;
 mod measure;
 mod moon;
 mod moon_run;
@@ -30,7 +32,7 @@ mod scheduler;
 mod socket;
 mod store;
 
-pub use client::{Demand, history, run, status, why};
+pub use client::{Demand, history, logs, run, status, why};
 pub use daemon::serve;
 pub use moon_run::moon;
 pub use socket::socket_path;

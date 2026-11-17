@@ -15,6 +15,7 @@ fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<()> {
         vouched: false,
         class: Class::Normal,
         submitter: "/work".into(),
+        log: format!("/logs/{id}.log").into(),
     };
     s.submit(job, start);
     started
@@ -110,6 +111,7 @@ fn an_unmeasured_job_is_not_counted_again_as_unmanaged() {
             vouched: true,
             class: Class::Normal,
             submitter: "/work".into(),
+            log: format!("/logs/{id}.log").into(),
         };
         s.submit(job, start);
         started
@@ -146,6 +148,7 @@ fn a_measured_job_below_its_estimate_does_not_hide_outside_load() {
         vouched: true,
         class: Class::Normal,
         submitter: "/work".into(),
+        log: format!("/logs/{id}.log").into(),
     };
     let (start, _first) = mpsc::channel();
     s.submit(job(1), start);

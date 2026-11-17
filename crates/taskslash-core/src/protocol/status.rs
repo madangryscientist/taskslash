@@ -30,6 +30,8 @@ pub struct JobStatus {
     pub cpu_threads: Option<f64>,
     pub mem_mib: Option<u64>,
     pub estimate: Estimate,
+    /// The file its output is copied into.
+    pub log_path: String,
 }
 
 /// A queued job: how long it has waited, its 1-based place in the queue, and why: `reason` as the

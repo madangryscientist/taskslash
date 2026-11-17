@@ -31,6 +31,7 @@ fn finished<'a>(argv: &'a [String], launch: Launch, at: u64, cost: Cost) -> Fini
         pressure: RunPressure::default(),
         cached: None,
         moon_hash: None,
+        log_path: None,
     }
 }
 
@@ -169,4 +170,25 @@ fn a_cache_hit_and_its_hash_are_recorded_and_read_back() {
         costs.iter().map(|c| c.cached).collect::<Vec<_>>(),
         [true, false]
     );
+}
+
+#[test]
+fn a_run_with_no_exit_code_is_not_a_failure_and_log_ends_add_the_wall_time() {
+    let store = Store::in_memory();
+    let argv = words(&["sh", "-c", "x"]);
+    let record = |at: u64, code: Option<i32>| {
+        let mut run = finished(&argv, Launch::Plain, at, Cost::default());
+        run.exit_code = code;
+        run.log_path = Some("/l");
+        store.record(&run).unwrap()
+    };
+    let failed = record(1000, Some(1));
+    // Newer, but its client went away: no exit code, so not a failure.
+    record(2000, None);
+    assert_eq!(
+        store.last_failed(Some("k")).unwrap().map(|r| r.id),
+        Some(failed)
+    );
+    // Started at 1000 ms and ran 12 ms.
+    assert!(store.log_ends().unwrap().contains(&("/l".to_owned(), 1012)));
 }

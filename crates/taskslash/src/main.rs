@@ -2,16 +2,17 @@
 //!
 //! Exit codes: 0 ok, 1 a failure that is not usage, 2 a usage error. `taskslash run` exits with
 //! its command's code instead. `taskslash history` and `taskslash status` exit 1 when no daemon is
-//! running, as `run` does. `taskslash moon` exits 1 when any target did not pass.
+//! running, as `run` does. `taskslash moon` exits 1 when any target did not pass. `taskslash logs`
+//! exits 1 when the log it names is not there.
 
 use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 use taskslash_core::Error;
 use taskslash_core::admission::waiting_line;
-use taskslash_core::protocol::{Class, Kind};
+use taskslash_core::protocol::{Class, Kind, LogSelect};
 use text::{estimate_text, status_text, table};
 
 mod text;
@@ -103,6 +104,31 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Print a job's or a run's log: everything its command wrote, stdout and stderr together.
+    ///
+    /// `taskslash run` and `taskslash moon` copy each job's output into a log of its own beside the
+    /// database (`TASKSLASH_LOGS` overrides the directory). The log goes to stdout unchanged.
+    /// Exits 1 when there is no such job or run, when the run was recorded before logs were kept,
+    /// or when its log has expired (the daemon deletes logs of jobs that ended over
+    /// `TASKSLASH_LOG_DAYS` ago, 7 by default, and the oldest ones past `TASKSLASH_LOG_MIB`, 1024).
+    #[command(group(ArgGroup::new("pick").required(true)))]
+    Logs {
+        /// A running job's number, as `status` shows it.
+        #[arg(group = "pick")]
+        job: Option<u64>,
+        /// A finished run, by the id `history` shows.
+        #[arg(long, value_name = "ID", group = "pick")]
+        run: Option<i64>,
+        /// The newest run of a key, running or not.
+        #[arg(long, value_name = "KEY", group = "pick")]
+        last: Option<String>,
+        /// The newest run (of a key, when given) that exited with a code other than 0.
+        #[arg(long, value_name = "KEY", num_args = 0..=1, group = "pick")]
+        failed: Option<Option<String>>,
+        /// Follow a running job's log until the job ends.
+        #[arg(short, long)]
+        follow: bool,
+    },
     /// Say why a job waits, or `running`. Exits 1 for a job the daemon does not hold (an ended
     /// job's record is in `history`).
     Why {
@@ -172,6 +198,22 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
             let cwd = std::env::current_dir()
                 .map_err(|e| Error::new(format!("cannot read the current directory: {e}")))?;
             taskslash_core::moon(&socket, &cwd, &targets, force, class(flag))
+        }
+        Commands::Logs {
+            job,
+            run,
+            last,
+            failed,
+            follow,
+        } => {
+            let select = match (job, run, last, failed) {
+                (Some(job), ..) => LogSelect::Job { job },
+                (_, Some(run), ..) => LogSelect::Run { run },
+                (_, _, Some(key), _) => LogSelect::Last { key },
+                (_, _, _, Some(key)) => LogSelect::Failed { key },
+                (None, None, None, None) => return Err(Error::usage("name a job or a run")),
+            };
+            taskslash_core::logs(&socket, &select, follow, &mut io::stdout().lock()).map(|()| 0)
         }
         Commands::Why { job, json } => {
             let text = match (taskslash_core::why(&socket, job)?, json) {

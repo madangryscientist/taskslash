@@ -47,6 +47,15 @@ fn scope_args() -> impl Iterator<Item = &'static str> {
     SCOPE_ARGS.into_iter().chain(expands().then_some(NO_EXPAND))
 }
 
+/// `Plain` when `TASKSLASH_LAUNCH` is `plain` (so the plain path can be run where a user session
+/// exists), else what `probe` finds.
+pub fn choose() -> Launch {
+    match std::env::var("TASKSLASH_LAUNCH").as_deref() {
+        Ok("plain") => Launch::Plain,
+        _ => probe(),
+    }
+}
+
 /// `Scope` when `systemd-run` with the job's arguments runs `true` and exits 0, else `Plain`. The
 /// daemon asks once, at startup.
 pub fn probe() -> Launch {

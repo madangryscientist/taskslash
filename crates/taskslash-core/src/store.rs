@@ -69,7 +69,13 @@ pub struct Finished<'a> {
     pub pressure: RunPressure,
     pub cached: Option<bool>,
     pub moon_hash: Option<String>,
+    pub log_path: Option<&'a str>,
 }
+
+/// The columns `from_row` reads, in its order.
+const RUN_COLUMNS: &str = "id, key, kind, argv, cwd, launch, started_at, wall_ms, cpu_usec,
+    peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code, machine_cpu_some, machine_mem_some,
+    machine_io_some, class, submitter, cached, moon_hash, log_path";
 
 pub struct Store {
     conn: Connection,
@@ -117,11 +123,24 @@ impl Store {
                 machine_mem_some REAL,
                 machine_io_some REAL,
                 cached INTEGER,
-                moon_hash TEXT
+                moon_hash TEXT,
+                log_path TEXT
             );
             CREATE INDEX IF NOT EXISTS runs_key ON runs (key, started_at);",
         )
         .map_err(sql)?;
+        // A database from before logs were kept gains the column; its rows have no log.
+        let has_log_path: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM pragma_table_info('runs') WHERE name = 'log_path')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sql)?;
+        if !has_log_path {
+            conn.execute_batch("ALTER TABLE runs ADD COLUMN log_path TEXT")
+                .map_err(sql)?;
+        }
         Ok(Self { conn })
     }
 
@@ -137,10 +156,11 @@ impl Store {
             .execute(
                 "INSERT INTO runs (key, kind, argv, cwd, launch, started_at, wall_ms, cpu_usec,
                     peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code, machine_cpu_some,
-                    machine_mem_some, machine_io_some, class, submitter, cached, moon_hash)
+                    machine_mem_some, machine_io_some, class, submitter, cached, moon_hash,
+                    log_path)
                  VALUES (?1, ?2, ?3, ?4, ?5,
                     strftime('%Y-%m-%dT%H:%M:%fZ', ?6 / 1000.0, 'unixepoch'),
-                    ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                    ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     run.key,
                     run.kind.as_str(),
@@ -161,6 +181,7 @@ impl Store {
                     run.submitter,
                     run.cached,
                     run.moon_hash,
+                    run.log_path,
                 ],
             )
             .map_err(sql)?;
@@ -171,16 +192,71 @@ impl Store {
     pub fn history(&self, key: &str) -> Result<Vec<Run>, Error> {
         let mut statement = self
             .conn
-            .prepare(
-                "SELECT id, key, kind, argv, cwd, launch, started_at, wall_ms, cpu_usec,
-                    peak_cpu_5s, peak_mem_bytes, written_bytes, exit_code, machine_cpu_some,
-                    machine_mem_some, machine_io_some, class, submitter, cached, moon_hash
-                 FROM runs WHERE key = ?1 ORDER BY started_at DESC, id DESC LIMIT ?2",
-            )
+            .prepare(&format!(
+                "SELECT {RUN_COLUMNS} FROM runs WHERE key = ?1
+                 ORDER BY started_at DESC, id DESC LIMIT ?2"
+            ))
             .map_err(sql)?;
         let limit = i64::try_from(HISTORY_LIMIT).unwrap_or(i64::MAX);
         statement
             .query_map(params![key, limit], from_row)
+            .map_err(sql)?
+            .collect::<Result<_, _>>()
+            .map_err(sql)
+    }
+
+    /// The run with id `id`.
+    pub fn run(&self, id: i64) -> Result<Option<Run>, Error> {
+        self.one(
+            &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ?1"),
+            params![id],
+        )
+    }
+
+    /// The newest run of `key`.
+    pub fn last(&self, key: &str) -> Result<Option<Run>, Error> {
+        self.one(
+            &format!(
+                "SELECT {RUN_COLUMNS} FROM runs WHERE key = ?1
+                 ORDER BY started_at DESC, id DESC LIMIT 1"
+            ),
+            params![key],
+        )
+    }
+
+    /// The newest run, of `key` when given, whose exit code is set and not 0. A run whose client
+    /// went away has no exit code and does not count.
+    pub fn last_failed(&self, key: Option<&str>) -> Result<Option<Run>, Error> {
+        self.one(
+            &format!(
+                "SELECT {RUN_COLUMNS} FROM runs
+                 WHERE exit_code IS NOT NULL AND exit_code != 0 AND (?1 IS NULL OR key = ?1)
+                 ORDER BY started_at DESC, id DESC LIMIT 1"
+            ),
+            params![key],
+        )
+    }
+
+    fn one(&self, query: &str, params: impl rusqlite::Params) -> Result<Option<Run>, Error> {
+        let mut statement = self.conn.prepare(query).map_err(sql)?;
+        let mut rows = statement.query_map(params, from_row).map_err(sql)?;
+        rows.next().transpose().map_err(sql)
+    }
+
+    /// Every run with a log, and when it ended (its start plus its wall time), in ms since the
+    /// epoch.
+    pub fn log_ends(&self) -> Result<Vec<(String, i64)>, Error> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT log_path,
+                    CAST(ROUND((julianday(started_at) - 2440587.5) * 86400000.0) AS INTEGER)
+                        + wall_ms
+                 FROM runs WHERE log_path IS NOT NULL",
+            )
+            .map_err(sql)?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(sql)?
             .collect::<Result<_, _>>()
             .map_err(sql)
@@ -261,6 +337,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Run> {
         machine_io_some: row.get(15)?,
         cached: row.get(18)?,
         moon_hash: row.get(19)?,
+        log_path: row.get(20)?,
     })
 }
 

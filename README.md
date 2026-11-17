@@ -26,12 +26,62 @@ taskslash history gate                    # the estimate of "gate", then what it
 taskslash history gate --json             # the same, as {"estimate": ..., "runs": [...]}
 taskslash status                          # is this machine busy, and with what
 taskslash status --json                   # the same, as one line of JSON
+taskslash logs 7                          # what running job 7 has printed so far
+taskslash logs 7 -f                       # the same, followed until it ends
+taskslash logs --last gate                # the newest run of "gate", running or not
+taskslash logs --failed                   # the newest run that failed
 ```
 
 `taskslash run` runs the command itself, in your directory, with your environment and terminal, and
 exits with its exit code (128+N when signal N killed it, 127 when it cannot be started). With no
 daemon running it does not run the command and exits 1; so do `taskslash history`,
-`taskslash status` and `taskslash why`.
+`taskslash status`, `taskslash why` and `taskslash logs`.
+
+### Every job's output is kept
+
+`taskslash run` copies everything the command writes into a log of the job's own, and still writes
+it to you exactly as before. So `taskslash run -- bun run test | tail -20` shows you 20 lines, and
+the whole output is still there afterwards: `taskslash logs --last 'bun run'`.
+
+- **On a terminal** (your stdout is one), the command runs on a pseudo-terminal of its own, so it
+  sees a terminal and keeps its colours and progress bars. Its window size follows yours, and what
+  you type reaches it. Your terminal is put back as it was when the command ends.
+- **Otherwise** (a pipe, a file, a background run), stdout and stderr stay separate: each goes to
+  your matching stream and into the log, so `> out 2> err` still splits them.
+- **Signals.** The command runs in a process group of its own. SIGINT, SIGTERM and SIGHUP sent to
+  `taskslash run` (Ctrl-C included) are passed on to that group, so the command ends the way it
+  would have without TaskSlash, and the exit code is still its own.
+
+`taskslash moon` does the same for each target: its stdout and stderr go to you and into that
+target's own log.
+
+A log holds stdout and stderr together, in the order the client read them, with nothing added. It
+is a file per job in `logs` beside the database (`~/.local/state/taskslash/logs/` by default, so
+`TASKSLASH_DB` moves it too), or in `$TASKSLASH_LOGS`. The daemon creates the directory with mode 0700 when it is missing (one that is already there keeps its mode), and each log is 0600.
+A log is named after the job's systemd unit, `taskslash-<daemon pid>-<job>.log`: job numbers start
+again at 1 when the daemon restarts, and the pid keeps the names apart. `taskslash status --json`
+shows each running job's `log_path`, and `taskslash history --json` each run's (null for a run
+recorded before logs were kept).
+
+**Retention.** At startup and once an hour, the daemon deletes the logs (`taskslash-*.log`, nothing
+else in the directory) of jobs that ended over 7 days ago, then the oldest ended ones until the directory is under 1 GiB. A running job's log is never
+deleted. `TASKSLASH_LOG_DAYS` (days, fractions allowed) and `TASKSLASH_LOG_MIB` change the limits.
+The run's row keeps the path of a deleted log.
+
+**Reading a log.** `taskslash logs` prints one log to stdout, unchanged:
+
+| Command | Picks |
+| --- | --- |
+| `taskslash logs <job>` | the running job with that number, as `taskslash status` shows it |
+| `taskslash logs --run <id>` | the recorded run with that id, as `taskslash history` shows it |
+| `taskslash logs --last <key>` | the newest run of the key, running or not |
+| `taskslash logs --failed [<key>]` | the newest run (of the key) with an exit code that is not 0; a signal's 128+N counts, a run with no exit code (its client went away) does not |
+
+`-f` follows a running job's log until the job ends, then exits. It exits 0 when it printed the log,
+and 1 with one line on stderr when there is no such job or run (`taskslash: no job 7`,
+`taskslash: no run of gate`), when the run was recorded before logs were kept
+(`taskslash: run 12 has no log`), or when retention deleted it
+(`taskslash: the log of run 12 has expired`); 2 on a usage error.
 
 ### moon targets
 
@@ -91,7 +141,8 @@ was not measured; a run whose `taskslash run` went away before the command ended
 is left alone), and the daemon reads the scope's cgroup every 250 ms while it runs. When it does
 not (CI, a container, macOS), the daemon logs `taskslash: no systemd user session, jobs run
 unmeasured`, runs jobs as plain children, and records wall time and exit code only. Jobs are
-measured, never capped.
+measured, never capped. `TASKSLASH_LAUNCH=plain` makes the daemon use plain children even where a
+user session exists (the tests use it to run both paths on one machine).
 
 The database is SQLite, at `$TASKSLASH_DB`, else `$XDG_STATE_HOME/taskslash/taskslash.db`, else
 `~/.local/state/taskslash/taskslash.db`. Only the daemon writes it.

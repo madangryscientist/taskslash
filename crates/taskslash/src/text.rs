@@ -100,7 +100,8 @@ pub fn estimate_text(e: &Estimate) -> String {
 pub fn table(runs: &[Run]) -> String {
     const MIB: f64 = (1u64 << 20) as f64;
     let mut out = format!(
-        "{:<24}  {:>8}  {:>8}  {:>11}  {:>12}  {:>11}  {:>4}  {:>6}\n",
+        "{:>6}  {:<24}  {:>8}  {:>8}  {:>11}  {:>12}  {:>11}  {:>4}  {:>6}\n",
+        "id",
         "started_at",
         "wall",
         "cpu_s",
@@ -114,7 +115,8 @@ pub fn table(runs: &[Run]) -> String {
         let or_dash = |v: Option<String>| v.unwrap_or_else(|| "-".to_owned());
         let mib = |v: Option<i64>| or_dash(v.map(|b| format!("{:.1}", b as f64 / MIB)));
         out.push_str(&format!(
-            "{:<24}  {:>8}  {:>8}  {:>11}  {:>12}  {:>11}  {:>4}  {:>6}\n",
+            "{:>6}  {:<24}  {:>8}  {:>8}  {:>11}  {:>12}  {:>11}  {:>4}  {:>6}\n",
+            run.id,
             run.started_at,
             format!("{:.1}s", run.wall_ms as f64 / 1000.0),
             or_dash(run.cpu_usec.map(|u| format!("{:.2}", u as f64 / 1e6))),
@@ -157,12 +159,14 @@ mod tests {
             machine_io_some: None,
             cached: None,
             moon_hash: None,
+            log_path: None,
         };
         let text = table(&[run]);
         let line: Vec<&str> = text.lines().nth(1).unwrap().split_whitespace().collect();
         assert_eq!(
             line,
             [
+                "1",
                 "2026-11-16T02:17:44.464Z",
                 "1.2s",
                 "-",

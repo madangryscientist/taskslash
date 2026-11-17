@@ -23,6 +23,7 @@ impl Scheduler {
                     cpu_threads: live.map(|l| round(l.cpu_threads, 2)),
                     mem_mib: live.map(|l| l.mem_mib),
                     estimate: r.job.estimate.clone(),
+                    log_path: r.job.log.to_string_lossy().into_owned(),
                 }
             })
             .collect();
