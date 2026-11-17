@@ -9,7 +9,8 @@
 //! A query: the client sends `history`; the daemon answers `runs` (the key's estimate and its runs)
 //! and closes. Or it sends `status`; the daemon answers `status` (the machine's latest snapshot, the
 //! running jobs and the waiting ones). Or `why`; the daemon answers `why` (whether the job waits,
-//! runs or is not held, and why it waits).
+//! runs or is not held, and why it waits). Or `log`; the daemon answers `log` (the job or run it
+//! picked and where its log is).
 
 use crate::admission::Reason;
 use crate::estimate::Estimate;
@@ -123,6 +124,31 @@ pub enum ClientMessage {
     Status,
     /// Ask why job `job` waits.
     Why { job: u64 },
+    /// Ask which job or run `select` picks and where its log is.
+    Log { select: LogSelect },
+}
+
+/// Which log `taskslash logs` asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum LogSelect {
+    /// A job the daemon holds, by its number.
+    Job { job: u64 },
+    /// A recorded run, by its id.
+    Run { run: i64 },
+    /// The newest run of `key`, running or not.
+    Last { key: String },
+    /// The newest recorded run, of `key` when given, whose exit code is set and not 0.
+    Failed { key: Option<String> },
+}
+
+/// What a `log` query found: a running or waiting job (`job`), or a recorded run (`run`), and its
+/// log file. `log_path` is `None` for a waiting job and for a run recorded before capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogFound {
+    pub job: Option<u64>,
+    pub run: Option<i64>,
+    pub log_path: Option<String>,
 }
 
 /// How the client runs a job's command.
@@ -148,11 +174,13 @@ impl Launch {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonMessage {
-    /// The job is admitted: run it now, under the systemd unit `unit` when `launch` is `scope`.
+    /// The job is admitted: run it now, under the systemd unit `unit` when `launch` is `scope`,
+    /// copying its output into the file `log`.
     Start {
         job: u64,
         unit: String,
         launch: Launch,
+        log: String,
     },
     /// The job is queued, for `reason`, and has waited `waited_s`, `position` (1-based) in the
     /// queue's order; `start` follows when it is admitted.
@@ -178,6 +206,8 @@ pub enum DaemonMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<usize>,
     },
+    /// The answer to `log`: `None` when nothing matches.
+    Log { found: Option<LogFound> },
     /// The request was refused; the daemon closes the connection after this.
     Error { message: String },
 }
@@ -223,6 +253,9 @@ pub struct Run {
     pub cached: Option<bool>,
     /// The hash moon ran the target under; `None` when it gave none.
     pub moon_hash: Option<String>,
+    /// The file its output was copied into; `None` for a run recorded before capture. The file
+    /// may be gone: retention deletes old logs and keeps the path.
+    pub log_path: Option<String>,
 }
 
 /// `{"estimate":...,"runs":[...]}`, pretty, and a newline, as `taskslash history --json` prints it.

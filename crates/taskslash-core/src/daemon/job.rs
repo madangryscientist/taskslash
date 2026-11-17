@@ -3,6 +3,7 @@
 use super::Daemon;
 use crate::admission::ordinal;
 use crate::estimate::{Source, estimate};
+use crate::logs;
 use crate::measure::{self, Cost, Sampler};
 use crate::protocol::{Class, ClientMessage, DaemonMessage, Kind, Launch, receive, send};
 use crate::scheduler::Job;
@@ -54,6 +55,9 @@ impl Daemon {
             submitter,
         } = submitted;
         let id = self.next_job.fetch_add(1, Ordering::Relaxed);
+        // The daemon's pid keeps unit names apart across restarts and daemons on other sockets.
+        let unit = format!("taskslash-{}-{id}", process::id());
+        let log = logs::log_path(&self.logs, &unit);
         let key = store::key(name, argv);
         let costs = self.store().costs(&key).unwrap_or_else(|e| {
             eprintln!("taskslash: job {id} estimated from defaults: {e}");
@@ -76,6 +80,7 @@ impl Daemon {
             vouched: cpu.is_some() && mem_mib.is_some(),
             class,
             submitter: submitter.to_owned(),
+            log: log.clone(),
         };
         let (start, started) = mpsc::channel();
         let waiting = {
@@ -125,8 +130,6 @@ impl Daemon {
             }
         }
 
-        // The daemon's pid keeps unit names apart across restarts and daemons on other sockets.
-        let unit = format!("taskslash-{}-{id}", process::id());
         eprintln!("job {id} started ({class}): {}", argv.join(" "));
         let sampler = match self.launch {
             Launch::Scope => measure::cgroup_dir(&unit).map(Sampler::start),
@@ -135,10 +138,12 @@ impl Daemon {
         if let Some(sampler) = &sampler {
             self.scheduler().set_live(id, sampler.live());
         }
+        let log = log.to_string_lossy().into_owned();
         let start = DaemonMessage::Start {
             job: id,
             unit,
             launch: self.launch,
+            log: log.clone(),
         };
         let (exit_code, cached, moon_hash) = match send(writer, &start)
             .ok()
@@ -176,6 +181,7 @@ impl Daemon {
             pressure: running.pressure(),
             cached,
             moon_hash,
+            log_path: Some(&log),
         };
         let recorded = self.store().record(&finished);
         // After the row, so a job that finished counts as seen when the next one is considered.

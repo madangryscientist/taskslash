@@ -6,10 +6,15 @@ use crate::Error;
 use crate::admission::Limits;
 use crate::estimate::estimate;
 use crate::launch;
-use crate::protocol::{ClientMessage, DaemonMessage, Kind, Launch, Status, receive, send};
+use crate::logs::{self, Retention};
+use crate::procfs;
+use crate::protocol::{
+    ClientMessage, DaemonMessage, Kind, Launch, LogFound, LogSelect, Run, Status, receive, send,
+};
 use crate::sampler::{FileSampler, MachineSampler, MachineSnapshot, ProcSampler};
 use crate::scheduler::{Scheduler, lock};
 use crate::store::Store;
+use std::collections::HashMap;
 use std::fs::{self, DirBuilder};
 use std::io::BufReader;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
@@ -18,16 +23,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How often the machine is sampled.
 const SAMPLE_EVERY: Duration = Duration::from_secs(1);
+/// How often expired logs are deleted, besides at startup.
+const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 
 mod job;
 
 /// What every connection shares. Lock order: `scheduler` before `store`, never the other way.
 struct Daemon {
     launch: Launch,
+    /// The directory every job's log goes in, and how long they are kept.
+    logs: PathBuf,
+    retention: Retention,
     store: Mutex<Store>,
     next_job: AtomicU64,
     machine: Mutex<MachineSnapshot>,
@@ -38,23 +48,29 @@ struct Daemon {
 pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
     let store = Store::open(db)?;
     let limits = Limits::from_env()?;
+    let retention = Retention::from_env()?;
+    let logs = logs::logs_dir(db);
+    logs::create_dir(&logs)?;
     let mut machine = sampler()?;
     // Asked before binding, so a daemon that accepts has already logged its launch path.
-    let launch = launch::probe();
+    let launch = launch::choose();
     let listener = bind(path)?;
     if launch == Launch::Plain {
         eprintln!("taskslash: no systemd user session, jobs run unmeasured");
     }
     eprintln!(
-        "taskslash daemon listening on {} (launch: {}, database: {})",
+        "taskslash daemon listening on {} (launch: {}, database: {}, logs: {})",
         path.display(),
         launch.as_str(),
-        db.display()
+        db.display(),
+        logs.display()
     );
     // The first snapshot is taken before the first connection, so `status` always has one.
     let first = machine.sample();
     let daemon = Arc::new(Daemon {
         launch,
+        logs,
+        retention,
         store: Mutex::new(store),
         next_job: AtomicU64::new(1),
         scheduler: Mutex::new(Scheduler::new(limits, first.clone())),
@@ -62,6 +78,15 @@ pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
     });
     let sampling = Arc::clone(&daemon);
     thread::spawn(move || sampling.sample_forever(machine));
+    // Once before the first connection, then every hour.
+    daemon.sweep();
+    let sweeping = Arc::clone(&daemon);
+    thread::spawn(move || {
+        loop {
+            thread::sleep(SWEEP_EVERY);
+            sweeping.sweep();
+        }
+    });
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -166,10 +191,19 @@ impl Daemon {
             Ok(Some(ClientMessage::Why { job })) => {
                 let _ = send(&mut writer, &self.why(job));
             }
+            Ok(Some(ClientMessage::Log { select })) => {
+                let reply = match self.log(select) {
+                    Ok(found) => DaemonMessage::Log { found },
+                    Err(e) => DaemonMessage::Error {
+                        message: e.to_string(),
+                    },
+                };
+                let _ = send(&mut writer, &reply);
+            }
             Ok(Some(ClientMessage::Exited { .. })) => {
                 refuse(
                     &mut writer,
-                    "expected submit, history, status or why, got exited",
+                    "expected submit, history, status, why or log, got exited",
                 );
             }
             Err(e) => refuse(&mut writer, &format!("bad request: {e}")),
@@ -183,6 +217,74 @@ impl Daemon {
         let kind = runs.first().map_or(Kind::Command, |run| run.kind);
         let estimate = estimate(&store.costs(key)?, kind);
         Ok(DaemonMessage::Runs { estimate, runs })
+    }
+
+    /// The job or run `select` picks, and its log.
+    fn log(&self, select: LogSelect) -> Result<Option<LogFound>, Error> {
+        let recorded = |run: Option<Run>| {
+            run.map(|run| LogFound {
+                job: None,
+                run: Some(run.id),
+                log_path: run.log_path,
+            })
+        };
+        let held = |job: u64, (path, running): (PathBuf, bool)| LogFound {
+            job: Some(job),
+            run: None,
+            log_path: running.then(|| path.to_string_lossy().into_owned()),
+        };
+        Ok(match select {
+            LogSelect::Job { job } => self.scheduler().log(job).map(|found| held(job, found)),
+            LogSelect::Run { run } => recorded(self.store().run(run)?),
+            LogSelect::Last { key } => {
+                let running = {
+                    let scheduler = self.scheduler();
+                    scheduler.last_running(&key).and_then(|(job, at)| {
+                        scheduler.log(job).map(|found| (held(job, found), at))
+                    })
+                };
+                let run = self.store().last(&key)?;
+                match (running, run) {
+                    (Some((_, at)), Some(run)) if run.started_at > procfs::rfc3339(at) => {
+                        recorded(Some(run))
+                    }
+                    (Some((found, _)), _) => Some(found),
+                    (None, run) => recorded(run),
+                }
+            }
+            LogSelect::Failed { key } => recorded(self.store().last_failed(key.as_deref())?),
+        })
+    }
+
+    /// Deletes the expired logs. The scheduler stays locked throughout, so no job starts or ends
+    /// between reading which run and deleting.
+    fn sweep(&self) {
+        let scheduler = self.scheduler();
+        let running = scheduler.running_logs();
+        let ended: HashMap<PathBuf, SystemTime> = match self.store().log_ends() {
+            Ok(ends) => ends
+                .into_iter()
+                .map(|(path, ms)| {
+                    let ms = u64::try_from(ms).unwrap_or(0);
+                    (PathBuf::from(path), UNIX_EPOCH + Duration::from_millis(ms))
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!("taskslash: logs not swept: {e}");
+                return;
+            }
+        };
+        let gone = logs::sweep(
+            &self.logs,
+            &running,
+            &ended,
+            &self.retention,
+            SystemTime::now(),
+        );
+        drop(scheduler);
+        if !gone.is_empty() {
+            eprintln!("taskslash: deleted {} expired log(s)", gone.len());
+        }
     }
 
     /// Where job `id` is and, when it waits, why.

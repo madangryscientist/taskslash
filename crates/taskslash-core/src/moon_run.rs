@@ -2,14 +2,17 @@
 //! daemon decides how many run at once instead of moon's `--concurrency`.
 
 use crate::Error;
+use crate::capture::{Source, pump};
 use crate::client::{Demand, Job, Report, run_job};
 use crate::moon::{self, Node};
 use crate::protocol::Class;
 use std::ffi::OsString;
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -187,9 +190,9 @@ fn run_node(
         label: Some(&node.target),
     };
     let mut wall = Duration::ZERO;
-    let result = run_job(socket, &job, |command| {
+    let result = run_job(socket, &job, |command, log| {
         let clock = Instant::now();
-        let ran = exec(command, &node.target);
+        let ran = exec(command, &node.target, log);
         wall = clock.elapsed();
         let (status, cached) = ran?;
         let report = Report {
@@ -215,23 +218,75 @@ fn run_node(
     }
 }
 
-/// Runs `command` with its stdout passed through line by line, and says whether moon replayed
-/// `target` from its cache: moon prints `<target> (cached, <hash>)` then. (The target's
-/// `lastRun.json` cannot say: moon rewrites its `lastRunTime` on a cache hit too.)
-fn exec(mut command: Command, target: &str) -> io::Result<(ExitStatus, bool)> {
-    let mut child = command.stdout(Stdio::piped()).spawn()?;
-    let mut cached = false;
+/// Runs `command` with its stdout and stderr passed through line by line, each to the matching
+/// stream and both into `log`, and says whether moon replayed `target` from its cache: moon prints
+/// `<target> (cached, <hash>)` on stdout then. (The target's `lastRun.json` cannot say: moon
+/// rewrites its `lastRunTime` on a cache hit too.)
+fn exec(
+    mut command: Command,
+    target: &str,
+    mut log: Option<File>,
+) -> io::Result<(ExitStatus, bool)> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut sources = Vec::new();
+    // Whether each source is stdout (else stderr).
+    let mut is_stdout = Vec::new();
     if let Some(stdout) = child.stdout.take() {
-        let marker = format!("{target} (cached");
-        for line in BufReader::new(stdout).split(b'\n') {
-            let Ok(mut line) = line else { break };
-            cached |= plain(&line).contains(&marker);
-            line.push(b'\n');
-            // A closed stdout is no reason to stop the job; keep reading so it never blocks.
-            let _ = io::stdout().lock().write_all(&line);
-        }
+        sources.push(Source {
+            fd: stdout.into(),
+            output: true,
+        });
+        is_stdout.push(true);
     }
-    Ok((child.wait()?, cached))
+    if let Some(stderr) = child.stderr.take() {
+        sources.push(Source {
+            fd: stderr.into(),
+            output: true,
+        });
+        is_stdout.push(false);
+    }
+    let marker = format!("{target} (cached");
+    let done = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let done = &done;
+        let log = log.as_mut();
+        let is_stdout = &is_stdout;
+        let marker = &marker;
+        let pumping = scope.spawn(move || {
+            let mut cached = false;
+            let mut partial: Vec<Vec<u8>> = vec![Vec::new(); is_stdout.len()];
+            let emit = |i: usize, line: &[u8], cached: &mut bool| {
+                // A closed stream is no reason to stop the job; keep reading so it never blocks.
+                if is_stdout[i] {
+                    *cached |= plain(line).contains(marker.as_str());
+                    let _ = io::stdout().lock().write_all(line);
+                } else {
+                    let _ = io::stderr().lock().write_all(line);
+                }
+            };
+            pump(sources, log, done, |i, chunk| {
+                partial[i].extend_from_slice(chunk);
+                while let Some(at) = partial[i].iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = partial[i].drain(..=at).collect();
+                    emit(i, &line, &mut cached);
+                }
+                true
+            });
+            for (i, rest) in partial.iter().enumerate() {
+                if !rest.is_empty() {
+                    emit(i, rest, &mut cached);
+                }
+            }
+            cached
+        });
+        let status = child.wait();
+        done.store(true, Ordering::Release);
+        let cached = pumping.join().unwrap_or(false);
+        Ok((status?, cached))
+    })
 }
 
 /// `line` as text with its terminal escape sequences (`ESC [ ... <letter>`) taken out.

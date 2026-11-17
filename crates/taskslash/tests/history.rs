@@ -267,6 +267,7 @@ fn plain_history_prints_a_header_and_a_line_per_run() {
     assert_eq!(
         header,
         [
+            "id",
             "started_at",
             "wall",
             "cpu_s",

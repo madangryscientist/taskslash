@@ -10,7 +10,8 @@ use crate::order::{Active, Class, Queued};
 use crate::protocol::{JobState, Kind};
 use crate::sampler::MachineSnapshot;
 use crate::store::RunPressure;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Instant, SystemTime};
@@ -26,6 +27,8 @@ pub struct Job {
     pub class: Class,
     /// The worktree (or directory) it was submitted from, which fair share is counted by.
     pub submitter: String,
+    /// The file its client copies its output into.
+    pub log: PathBuf,
 }
 
 /// How many machine samples the unmanaged figure is the mean of.
@@ -223,6 +226,31 @@ impl Scheduler {
         if let Some(running) = self.running.get_mut(&id) {
             running.live = Some(live);
         }
+    }
+
+    /// The log of job `id` and whether it runs (else it waits); `None` when it is not held.
+    pub fn log(&self, id: u64) -> Option<(PathBuf, bool)> {
+        if let Some(running) = self.running.get(&id) {
+            return Some((running.job.log.clone(), true));
+        }
+        self.queue
+            .iter()
+            .find(|w| w.job.id == id)
+            .map(|w| (w.job.log.clone(), false))
+    }
+
+    /// The running job of `key` that started last: its number and start.
+    pub fn last_running(&self, key: &str) -> Option<(u64, SystemTime)> {
+        self.running
+            .values()
+            .filter(|r| r.job.key == key)
+            .max_by_key(|r| (r.started_at, r.job.id))
+            .map(|r| (r.job.id, r.started_at))
+    }
+
+    /// The logs of the running jobs, which retention never deletes.
+    pub fn running_logs(&self) -> HashSet<PathBuf> {
+        self.running.values().map(|r| r.job.log.clone()).collect()
     }
 
     /// Ends job `id`, returning it.

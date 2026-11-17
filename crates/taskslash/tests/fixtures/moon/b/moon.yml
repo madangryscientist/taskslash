@@ -1,7 +1,8 @@
-# `typecheck` fails, so `lint`, which depends on it, is skipped.
+# `typecheck` fails, so `lint`, which depends on it, is skipped. `test` writes a line to stdout
+# and one to stderr, which its log holds.
 tasks:
   test:
-    command: "true"
+    script: "echo b-test-out; echo b-test-err >&2"
   typecheck:
     command: "false"
   lint:

@@ -1,11 +1,13 @@
 //! The client side: `taskslash run` asks the daemon for a job, runs the command as this process's
-//! child the way the daemon says, reports how it ended, and returns its exit code (`taskslash moon`
+//! child the way the daemon says (its output copied into the log the daemon names, `capture`),
+//! reports how it ended, and returns its exit code (`taskslash moon`
 //! does the same for many jobs at once, one thread and one connection each);
 //! `taskslash history` asks for a key's recorded runs, `taskslash status` for what is running, and
 //! `taskslash why` why a job waits.
 
 use crate::Error;
 use crate::admission::{Reason, waiting_line};
+use crate::capture;
 use crate::estimate::Estimate;
 use crate::launch;
 use crate::protocol::{
@@ -13,7 +15,8 @@ use crate::protocol::{
 };
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, BufReader};
+use std::fs::File;
+use std::io::{self, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -21,6 +24,9 @@ use std::process::{Command, ExitStatus};
 
 /// The exit code when the command cannot be started, as a shell uses.
 const CANNOT_RUN: i32 = 127;
+
+mod logs;
+pub use logs::logs;
 
 /// A connection to the daemon: its two halves, and how to word an I/O failure on it.
 struct Connection<'a> {
@@ -100,8 +106,8 @@ pub fn run(
         cwd: &cwd,
         label: None,
     };
-    run_job(socket, &job, |mut command| {
-        command.status().map(|status| (status, Report::default()))
+    run_job(socket, &job, |command, log| {
+        capture::run(command, log).map(|status| (status, Report::default()))
     })
     .map(|(code, _)| code)
 }
@@ -126,12 +132,13 @@ pub(crate) struct Report {
 }
 
 /// Submits `job` on a connection of its own, waits for admission, has `exec` run the prepared
-/// command (in `job.cwd`) to its end, and reports the end to the daemon. Several may run at once,
-/// one per thread. Returns the exit code and `exec`'s report; an `Err` means the command never ran.
+/// command (in `job.cwd`) to its end with the job's log open for it (`None` when it cannot be
+/// opened), and reports the end to the daemon. Several may run at once, one per thread. Returns the
+/// exit code and `exec`'s report; an `Err` means the command never ran.
 pub(crate) fn run_job(
     socket: &Path,
     job: &Job,
-    exec: impl FnOnce(Command) -> io::Result<(ExitStatus, Report)>,
+    exec: impl FnOnce(Command, Option<File>) -> io::Result<(ExitStatus, Report)>,
 ) -> Result<(i32, Report), Error> {
     let mut daemon = Connection::open(socket)?;
     let submit = ClientMessage::Submit {
@@ -149,9 +156,14 @@ pub(crate) fn run_job(
         submitter: submitter(job.cwd).to_string_lossy().into_owned(),
     };
     let mut reply = daemon.ask(&submit)?;
-    let (id, unit, launch) = loop {
+    let (id, unit, launch, log) = loop {
         match reply {
-            DaemonMessage::Start { job, unit, launch } => break (job, unit, launch),
+            DaemonMessage::Start {
+                job,
+                unit,
+                launch,
+                log,
+            } => break (job, unit, launch, log),
             DaemonMessage::Waiting {
                 reason,
                 waited_s,
@@ -172,21 +184,25 @@ pub(crate) fn run_job(
     };
 
     let program = Path::new(&job.argv[0]);
-    let (code, report) = if launch == Launch::Scope && !launch::can_start(program) {
-        eprintln!(
-            "taskslash: cannot run {}: no such executable",
-            program.display()
-        );
+    let mut log = capture::open_log(Path::new(&log));
+    // Said on stderr and in the log, so the log of a run that never started says why.
+    let cannot_run = |why: &dyn std::fmt::Display, log: Option<&mut File>| {
+        let line = format!("taskslash: cannot run {}: {why}\n", program.display());
+        eprint!("{line}");
+        if let Some(log) = log {
+            let _ = log.write_all(line.as_bytes());
+        }
         (CANNOT_RUN, Report::default())
+    };
+    let (code, report) = if launch == Launch::Scope && !launch::can_start(program) {
+        cannot_run(&"no such executable", log.as_mut())
     } else {
         let mut command = launch::command(launch, &unit, job.class, job.argv);
         command.current_dir(job.cwd);
-        match exec(command) {
+        let mut copy = log.as_ref().and_then(|log| log.try_clone().ok());
+        match exec(command, log) {
             Ok((status, report)) => (exit_code(status), report),
-            Err(e) => {
-                eprintln!("taskslash: cannot run {}: {e}", program.display());
-                (CANNOT_RUN, Report::default())
-            }
+            Err(e) => cannot_run(&e, copy.as_mut()),
         }
     };
 

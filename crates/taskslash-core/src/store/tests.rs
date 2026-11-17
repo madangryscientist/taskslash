@@ -31,6 +31,7 @@ fn finished<'a>(argv: &'a [String], launch: Launch, at: u64, cost: Cost) -> Fini
         pressure: RunPressure::default(),
         cached: None,
         moon_hash: None,
+        log_path: None,
     }
 }
 
@@ -169,4 +170,74 @@ fn a_cache_hit_and_its_hash_are_recorded_and_read_back() {
         costs.iter().map(|c| c.cached).collect::<Vec<_>>(),
         [true, false]
     );
+}
+
+#[test]
+fn a_database_without_log_path_opens_and_gains_it_with_its_rows_intact() {
+    let path = std::env::temp_dir().join(format!("tks-old-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        // The table as it was before logs were kept, with one run in it.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE runs (
+                id INTEGER PRIMARY KEY, key TEXT NOT NULL, kind TEXT NOT NULL,
+                argv TEXT NOT NULL, cwd TEXT NOT NULL, class TEXT NOT NULL,
+                submitter TEXT NOT NULL, launch TEXT NOT NULL, started_at TEXT NOT NULL,
+                wall_ms INTEGER NOT NULL, cpu_usec INTEGER, peak_cpu_5s REAL,
+                peak_mem_bytes INTEGER, written_bytes INTEGER, exit_code INTEGER,
+                machine_cpu_some REAL, machine_mem_some REAL, machine_io_some REAL,
+                cached INTEGER, moon_hash TEXT
+            );
+            INSERT INTO runs (key, kind, argv, cwd, class, submitter, launch, started_at,
+                wall_ms, exit_code)
+            VALUES ('k', 'test', '[\"true\"]', '/work', 'normal', '/work', 'plain',
+                '2026-11-01T00:00:00.000Z', 5, 0);",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let old = store.history("k").unwrap();
+    assert_eq!(old.len(), 1);
+    assert_eq!((old[0].wall_ms, old[0].log_path.as_deref()), (5, None));
+    let argv = words(&["true"]);
+    let mut new = finished(&argv, Launch::Plain, 1_800_000_000_000, Cost::default());
+    new.log_path = Some("/logs/taskslash-1-1.log");
+    store.record(&new).unwrap();
+    assert_eq!(
+        store.history("k").unwrap()[0].log_path.as_deref(),
+        Some("/logs/taskslash-1-1.log")
+    );
+    drop(store);
+    // Opening again finds the column and leaves it.
+    assert_eq!(Store::open(&path).unwrap().history("k").unwrap().len(), 2);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn a_run_is_found_by_id_by_key_and_as_the_newest_failure() {
+    let store = Store::in_memory();
+    let argv = words(&["sh", "-c", "x"]);
+    let record = |key: &'static str, at: u64, code: Option<i32>| {
+        let mut run = finished(&argv, Launch::Plain, at, Cost::default());
+        run.key = key;
+        run.exit_code = code;
+        run.log_path = Some("/l");
+        store.record(&run).unwrap()
+    };
+    let failed_a = record("a", 1000, Some(1));
+    let signalled_b = record("b", 2000, Some(130));
+    let _passed_a = record("a", 3000, Some(0));
+    let dropped_a = record("a", 4000, None);
+    let id = |run: Option<Run>| run.map(|r| r.id);
+    assert_eq!(id(store.run(failed_a).unwrap()), Some(failed_a));
+    assert_eq!(id(store.run(999).unwrap()), None);
+    assert_eq!(id(store.last("a").unwrap()), Some(dropped_a));
+    assert_eq!(id(store.last("none").unwrap()), None);
+    assert_eq!(id(store.last_failed(None).unwrap()), Some(signalled_b));
+    assert_eq!(id(store.last_failed(Some("a")).unwrap()), Some(failed_a));
+    assert_eq!(id(store.last_failed(Some("none")).unwrap()), None);
+    let ends = store.log_ends().unwrap();
+    assert_eq!(ends.len(), 4);
+    assert!(ends.contains(&("/l".to_owned(), 1012)), "{ends:?}");
 }
