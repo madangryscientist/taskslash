@@ -1,6 +1,6 @@
 //! `taskslash daemon`: hands out jobs, measures them, and records a row for each when it ends. One
-//! thread per connection; a connection is one job or one query. One more thread samples the
-//! machine once a second, and `status` answers from its latest snapshot.
+//! thread per connection; a connection is one job, one query or one subscriber to the job events.
+//! One more thread samples the machine once a second, and `status` answers from its latest snapshot.
 
 use crate::Error;
 use crate::admission::Limits;
@@ -30,6 +30,7 @@ const SAMPLE_EVERY: Duration = Duration::from_secs(1);
 /// How often expired logs are deleted, besides at startup.
 const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 
+mod events;
 mod job;
 
 /// What every connection shares. Lock order: `scheduler` before `store`, never the other way.
@@ -42,6 +43,8 @@ struct Daemon {
     next_job: AtomicU64,
     machine: Mutex<MachineSnapshot>,
     scheduler: Mutex<Scheduler>,
+    /// The subscribers to the job events.
+    events: events::Bus,
 }
 
 /// Binds the socket at `path`, opens the database at `db`, and serves until the process is killed.
@@ -75,6 +78,7 @@ pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
         next_job: AtomicU64::new(1),
         scheduler: Mutex::new(Scheduler::new(limits, first.clone())),
         machine: Mutex::new(first),
+        events: events::Bus::default(),
     });
     let sampling = Arc::clone(&daemon);
     thread::spawn(move || sampling.sample_forever(machine));
@@ -200,10 +204,11 @@ impl Daemon {
                 };
                 let _ = send(&mut writer, &reply);
             }
+            Ok(Some(ClientMessage::Subscribe)) => self.serve_subscriber(&mut writer),
             Ok(Some(ClientMessage::Exited { .. })) => {
                 refuse(
                     &mut writer,
-                    "expected submit, history, status, why or log, got exited",
+                    "expected submit, history, status, why, log or subscribe, got exited",
                 );
             }
             Err(e) => refuse(&mut writer, &format!("bad request: {e}")),

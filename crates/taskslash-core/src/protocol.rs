@@ -11,6 +11,11 @@
 //! running jobs and the waiting ones). Or `why`; the daemon answers `why` (whether the job waits,
 //! runs or is not held, and why it waits). Or `log`; the daemon answers `log` (the job or run it
 //! picked and where its log is).
+//!
+//! A subscriber: the client sends `subscribe`; the daemon answers `subscribed`, then sends one
+//! `event` per job event (queued, started, finished) until the client hangs up. It never replays
+//! an event from before `subscribed`, and never waits for a slow subscriber: what does not fit in
+//! its queue of 1024 is dropped and counted in a `dropped` event.
 
 use crate::admission::Reason;
 use crate::estimate::Estimate;
@@ -130,6 +135,9 @@ pub enum ClientMessage {
     Why { job: u64 },
     /// Ask which job or run `select` picks and where its log is.
     Log { select: LogSelect },
+    /// Follow the daemon's job events: `subscribed`, then one `event` per job event from then on,
+    /// until the client hangs up.
+    Subscribe,
 }
 
 /// Which log `taskslash logs` asks for.
@@ -212,8 +220,58 @@ pub enum DaemonMessage {
     },
     /// The answer to `log`: `None` when nothing matches.
     Log { found: Option<LogFound> },
+    /// The answer to `subscribe`; `event` lines follow.
+    Subscribed { protocol: u32 },
+    /// One job event. `seq` counts up per daemon from 1; a `dropped` event stands for the events
+    /// this subscriber missed and carries the seq of the last of them.
+    Event {
+        protocol: u32,
+        seq: u64,
+        event: JobEvent,
+    },
     /// The request was refused; the daemon closes the connection after this.
     Error { message: String },
+}
+
+/// What happened to a job, as a subscriber sees it. Every `queued` is followed by exactly one
+/// `finished`; `started` comes between them when the job ran. Times are RFC 3339, UTC.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobEvent {
+    /// The job was submitted and takes its place in the queue.
+    Queued {
+        job: u64,
+        key: String,
+        kind: Kind,
+        class: Class,
+        submitter: String,
+        cwd: String,
+        argv: Vec<String>,
+        at: String,
+    },
+    /// The job was admitted and its client told to run it, its output going into `log`.
+    Started {
+        job: u64,
+        unit: String,
+        launch: Launch,
+        log: String,
+        at: String,
+    },
+    /// The job ended. `exit_code` is null when the client went away first, `run` when its row was
+    /// not written. A job that never started has `exit_code`, `run` and `log` null and `wall_ms` 0.
+    Finished {
+        job: u64,
+        key: String,
+        exit_code: Option<i32>,
+        wall_ms: u64,
+        cached: Option<bool>,
+        moon_hash: Option<String>,
+        run: Option<i64>,
+        log: Option<String>,
+        at: String,
+    },
+    /// This subscriber was too slow to take `count` events, which it will not get.
+    Dropped { count: u64 },
 }
 
 /// Where a job is, as `why` answers.

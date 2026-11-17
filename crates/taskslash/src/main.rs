@@ -1,9 +1,10 @@
 //! The `taskslash` command line: argv only, over `taskslash-core`.
 //!
 //! Exit codes: 0 ok, 1 a failure that is not usage, 2 a usage error. `taskslash run` exits with
-//! its command's code instead. `taskslash history` and `taskslash status` exit 1 when no daemon is
-//! running, as `run` does. `taskslash moon` exits 1 when any target did not pass. `taskslash logs`
-//! exits 1 when the log it names is not there. `taskslash <name>`, for a name that is not a
+//! its command's code instead. `taskslash history`, `taskslash status` and `taskslash events` exit 1
+//! when no daemon is running, as `run` does; `events` exits 0 when the daemon hangs up.
+//! `taskslash moon` exits 1 when any target did not pass. `taskslash logs` exits 1 when the log it
+//! names is not there. `taskslash <name>`, for a name that is not a
 //! built-in, runs the plugin `taskslash-<name>` from `PATH` in place of taskslash, so the exit code
 //! is the plugin's; exit 2 when there is none.
 
@@ -141,6 +142,30 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Follow the daemon's job events: one line of JSON on stdout per event, as it happens.
+    ///
+    /// Each line is `{"type":"event","protocol":1,"seq":<n>,"event":{...}}`, `seq` counting up per
+    /// daemon from 1, and `event.type` one of these (with its fields):
+    ///
+    /// - queued: job, key, kind, class, submitter, cwd, argv, at
+    ///
+    /// - started: job, unit, launch, log (the job's log file), at
+    ///
+    /// - finished: job, key, exit_code, wall_ms, cached, moon_hash, run (the history id), log, at
+    ///
+    /// - dropped: count
+    ///
+    /// Every queued job gets one finished: exit_code is null when its client went away, run when
+    /// its row was not written, and a job that never started has exit_code, run and log null and
+    /// wall_ms 0. Times are RFC 3339, UTC. Events carry no output: read the log. Only events from
+    /// after the subscription are sent. A slow reader never slows a job: the daemon queues at most
+    /// 1024 events for it, drops the rest, and sends one dropped (with how many, and the seq of the
+    /// last one missed) before the next event it does take.
+    ///
+    /// A listener plugin runs this, or opens `TASKSLASH_SOCKET` and sends `{"type":"subscribe"}`
+    /// itself (the reply is `{"type":"subscribed","protocol":1}`, then the event lines). Exits 0
+    /// when the daemon hangs up, 1 when no daemon is running.
+    Events,
     /// List the plugins on PATH: every executable named `taskslash-<name>`.
     ///
     /// `taskslash <name> [args...]` runs the first `taskslash-<name>` on PATH in place of taskslash,
@@ -239,6 +264,9 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
             write!(io::stdout(), "{text}")
                 .map_err(|e| Error::new(format!("cannot write the plugins: {e}")))?;
             Ok(0)
+        }
+        Commands::Events => {
+            taskslash_core::events(&socket()?, &mut io::stdout().lock()).map(|()| 0)
         }
         Commands::Daemon => {
             taskslash_core::serve(&socket()?, &taskslash_core::db_path()?).map(|()| 0)
