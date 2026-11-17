@@ -226,12 +226,20 @@ pub enum DaemonMessage {
         launch: Launch,
         log: String,
     },
-    /// The job is queued, for `reason`, and has waited `waited_s`, `position` (1-based) in the
-    /// queue's order; `start` follows when it is admitted.
+    /// Job `job` is queued, for `reason`, and has waited `waited_s`, `position` (1-based) in the
+    /// queue's order; `start` follows when it is admitted. `never_seen` says its key has no
+    /// finished run and the caller did not vouch for it, and `assumed_threads` is then the CPU its
+    /// kind is assumed to take. A daemon older than `job` leaves all three out.
     Waiting {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job: Option<u64>,
         reason: Reason,
         waited_s: u64,
         position: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        never_seen: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assumed_threads: Option<f64>,
     },
     /// The job's end is recorded.
     Recorded { job: u64 },
@@ -241,7 +249,8 @@ pub enum DaemonMessage {
     Keys { keys: Vec<KeySummary> },
     /// The answer to `status`.
     Status(Box<Status>),
-    /// The answer to `why`: `reason`, `waited_s` and `position` are set when `state` is `waiting`.
+    /// The answer to `why`: `reason`, `waited_s` and `position` are set when `state` is `waiting`,
+    /// and `ended` when `state` is `not_found` but the daemon remembers the job ending.
     Why {
         job: u64,
         state: JobState,
@@ -251,6 +260,8 @@ pub enum DaemonMessage {
         waited_s: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ended: Option<JobEnded>,
     },
     /// The answer to `log`: `None` when nothing matches.
     Log { found: Option<LogFound> },
@@ -316,6 +327,53 @@ pub enum JobState {
     Running,
     /// The daemon does not hold it: never submitted, or ended (its record is in `history`).
     NotFound,
+}
+
+/// What became of a job that ended since the daemon started, as `why` answers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "as", rename_all = "snake_case")]
+pub enum JobEnded {
+    /// It ran and is recorded as run `run` of `key`; `exit_code` is `None` when its client went
+    /// away before reporting it.
+    Run {
+        run: i64,
+        key: String,
+        exit_code: Option<i32>,
+    },
+    /// It never ran: it left the queue, or its client went before it started.
+    NeverRan,
+    /// It ran, but its run could not be recorded.
+    Unrecorded,
+    /// It just ended and its run is being recorded.
+    Recording,
+}
+
+impl JobEnded {
+    /// The sentence `taskslash why <job>` prints for job `job`.
+    pub fn sentence(&self, job: u64) -> String {
+        match self {
+            Self::Run {
+                run,
+                key,
+                exit_code,
+            } => {
+                let exit = exit_code
+                    .map_or("no exit code (its client went away)".to_owned(), |c| {
+                        format!("exit {c}")
+                    });
+                format!(
+                    "job {job} ended: run {run} of {key}, {exit} (taskslash logs {job} shows its log)"
+                )
+            }
+            Self::NeverRan => format!(
+                "job {job} ended without running (it left the queue, or its client went before it started)"
+            ),
+            Self::Unrecorded => format!("job {job} ended, but its run was not recorded"),
+            Self::Recording => {
+                format!("job {job} just ended; its run is being recorded, try again in a moment")
+            }
+        }
+    }
 }
 
 /// One recorded run. A cost field is `None` when it was not measured, never 0 for unknown.
@@ -443,6 +501,48 @@ pub fn history_json(estimate: &Estimate, runs: &[Run]) -> String {
 /// A waiting job's reason as one line of JSON, as `taskslash why --json` prints it.
 pub fn reason_json(reason: &Reason) -> String {
     let mut text = serde_json::to_string(reason).unwrap_or_default();
+    text.push('\n');
+    text
+}
+
+/// An ended job as one line of JSON, as `taskslash why <job> --json` prints it:
+/// `{"kind":"ended","ended":{"as":"run",...}}`.
+pub fn ended_json(ended: &JobEnded) -> String {
+    #[derive(Serialize)]
+    struct Why<'a> {
+        kind: &'static str,
+        ended: &'a JobEnded,
+    }
+    let mut text = serde_json::to_string(&Why {
+        kind: "ended",
+        ended,
+    })
+    .unwrap_or_default();
+    text.push('\n');
+    text
+}
+
+/// The waiting jobs as a pretty JSON array and a newline, as `taskslash why --json` with no job
+/// prints it: `job`, `key`, `submitter` and `reason` (the reason object, null before its first
+/// pass) of each.
+pub fn waiting_json(waiting: &[WaitingStatus]) -> String {
+    #[derive(Serialize)]
+    struct Entry<'a> {
+        job: u64,
+        key: &'a str,
+        submitter: &'a str,
+        reason: Option<&'a Reason>,
+    }
+    let entries: Vec<Entry> = waiting
+        .iter()
+        .map(|w| Entry {
+            job: w.job,
+            key: &w.key,
+            submitter: &w.submitter,
+            reason: w.why.as_ref(),
+        })
+        .collect();
+    let mut text = serde_json::to_string_pretty(&entries).unwrap_or_default();
     text.push('\n');
     text
 }

@@ -265,7 +265,13 @@ fn reasons_read_as_the_spikes_sentences() {
         ],
     };
     assert_eq!(
-        waiting_line(&reason, 45, 2),
+        waiting_line(&Waiting {
+            job: None,
+            reason: &reason,
+            waited_s: 45,
+            position: 2,
+            never_run: None,
+        }),
         "taskslash: waiting 45s (2nd in line): cpu needs 4.8, free 1.8; held by cli-db:test (job 3), visual (job 5)"
     );
     let gate = Reason::Gate {
@@ -275,7 +281,13 @@ fn reasons_read_as_the_spikes_sentences() {
         mount: None,
     };
     assert_eq!(
-        waiting_line(&gate, 30, 1),
+        waiting_line(&Waiting {
+            job: None,
+            reason: &gate,
+            waited_s: 30,
+            position: 1,
+            never_run: None,
+        }),
         "taskslash: waiting 30s (1st in line): cpu pressure 52% over the 40% gate"
     );
     let ordinals: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22, 111].map(ordinal).into();
@@ -284,5 +296,77 @@ fn reasons_read_as_the_spikes_sentences() {
         [
             "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "111th"
         ]
+    );
+}
+
+fn holders(n: u64) -> Vec<Held> {
+    (1..=n)
+        .map(|job| Held {
+            job,
+            key: format!("k{job}"),
+            amount: (20 - job) as f64,
+        })
+        .collect()
+}
+
+#[test]
+fn a_waiting_line_starts_with_the_jobs_number() {
+    let reason = Reason::Resource {
+        resource: Resource::Cpu,
+        needs: 4.0,
+        free: 1.5,
+        held_by: holders(2),
+    };
+    assert_eq!(
+        waiting_line(&Waiting {
+            job: Some(18),
+            reason: &reason,
+            waited_s: 0,
+            position: 1,
+            never_run: None,
+        }),
+        "taskslash: job 18 waiting 0s (1st in line): cpu needs 4.0, free 1.5; held by k1 (job 1), k2 (job 2)"
+    );
+}
+
+#[test]
+fn a_reason_names_the_three_biggest_holders_and_counts_the_rest() {
+    let reason = Reason::Resource {
+        resource: Resource::Memory,
+        needs: 4096.0,
+        free: 100.0,
+        held_by: holders(11),
+    };
+    assert_eq!(
+        reason.to_string(),
+        "memory needs 4096 MiB, free 100 MiB; held by k1 (job 1), k2 (job 2), k3 (job 3) and 8 more"
+    );
+    let three = Reason::Resource {
+        resource: Resource::Cpu,
+        needs: 4.0,
+        free: 0.0,
+        held_by: holders(3),
+    };
+    assert!(three.to_string().ends_with("k3 (job 3)"), "{three}");
+}
+
+#[test]
+fn a_never_run_keys_first_line_says_what_it_was_assumed_to_take() {
+    let gate = Reason::Gate {
+        gate: Gate::CpuPressure,
+        value: 52.0,
+        limit: 40.0,
+        mount: None,
+    };
+    assert_eq!(
+        waiting_line(&Waiting {
+            job: Some(4),
+            reason: &gate,
+            waited_s: 0,
+            position: 1,
+            never_run: Some(2.0),
+        }),
+        "taskslash: job 4 waiting 0s (1st in line): cpu pressure 52% over the 40% gate \
+         (never run before: assumed 2.0 threads; --cpu 0.1 says otherwise)"
     );
 }

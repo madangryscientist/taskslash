@@ -66,12 +66,17 @@ impl Daemon {
     /// Starts `run --name <name> --cpu <cpu> --mem 100 -- sleep 30`, its stderr in `<name>.err`.
     /// The shell writes its pid to `<name>.pid` and becomes the `sleep`, so the test can end it.
     fn spawn(&mut self, name: &str, cpu: &str) {
+        self.spawn_with(name, &["--cpu", cpu, "--mem", "100"]);
+    }
+
+    /// `spawn` with `cost` in place of `--cpu <cpu> --mem 100`.
+    fn spawn_with(&mut self, name: &str, cost: &[&str]) {
         let pid = self.dir.join(format!("{name}.pid"));
         let script = format!("echo $$ > {}; exec sleep 30", pid.display());
         let err = fs::File::create(self.dir.join(format!("{name}.err"))).unwrap();
-        let args = [
-            "run", "--name", name, "--cpu", cpu, "--mem", "100", "--", "sh", "-c", &script,
-        ];
+        let mut args = vec!["run", "--name", name];
+        args.extend_from_slice(cost);
+        args.extend_from_slice(&["--", "sh", "-c", &script]);
         let child = Self::command(&self.dir, &args)
             .stdout(Stdio::null())
             .stderr(err)
@@ -206,10 +211,11 @@ fn spike_5_3_a_40_percent_job_waits_until_two_of_three_builds_end() {
     }
     let line = daemon.stderr("visual");
     eprintln!("visual's stderr: {}", line.trim());
-    assert!(
-        line.starts_with("taskslash: waiting 0s (1st in line): cpu needs 4.0, free 1.5; held by "),
-        "{line}"
-    );
+    let start =
+        format!("taskslash: job {job} waiting 0s (1st in line): cpu needs 4.0, free 1.5; held by ");
+    assert!(line.starts_with(&start), "{line}");
+    // It gave --cpu and --mem, so no never-run hint.
+    assert!(!line.contains("never run before"), "{line}");
     assert!(line.contains("build-1 (job "), "{line}");
     let why = daemon.why(job);
     assert_eq!(why["kind"], "resource", "{why}");
@@ -277,4 +283,91 @@ fn a_tripped_cpu_pressure_gate_holds_a_small_job_until_it_clears() {
 
     common::write_machine(&machine, 0.0);
     daemon.wait_for(3, |s| listed(s, "jobs", "small"));
+}
+
+#[test]
+fn a_never_run_key_says_its_number_and_assumed_cost_and_why_lists_every_waiting_job() {
+    let mut daemon = Daemon::start("never");
+    let out = daemon.run(&["why"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "nothing is waiting\n");
+    let out = daemon.run(&["why", "--json"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[]\n", "{out:?}");
+
+    let machine = daemon.dir.join("machine.json");
+    common::write_machine(&machine, 50.0);
+    daemon.wait_for(3, |s| s["machine"]["cpu"]["pressure"]["some_avg10"] == 50.0);
+    daemon.spawn_with("fresh", &[]);
+    let fresh = daemon.waiting("fresh");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !daemon.stderr("fresh").contains("waiting") {
+        assert!(
+            Instant::now() < deadline,
+            "no waiting line: {}",
+            daemon.log()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let line = daemon.stderr("fresh");
+    assert_eq!(
+        line.trim_end(),
+        format!(
+            "taskslash: job {fresh} waiting 0s (1st in line): cpu pressure 50% over the 40% gate \
+             (never run before: assumed 2.0 threads; --cpu 0.1 says otherwise)"
+        ),
+        "{line}"
+    );
+
+    daemon.spawn("vouched", "0.5");
+    let vouched = daemon.waiting("vouched");
+    let out = daemon.run(&["why"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let cwd = std::env::current_dir().unwrap();
+    let submitter = taskslash_core::submitter(&cwd);
+    let worktree = submitter.file_name().unwrap().to_string_lossy();
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.sort_unstable();
+    let mut want = [
+        format!("job {fresh} {worktree} fresh: cpu pressure 50% over the 40% gate"),
+        format!("job {vouched} {worktree} vouched: cpu pressure 50% over the 40% gate"),
+    ];
+    want.sort_unstable();
+    assert_eq!(lines, want, "{text}");
+    let out = daemon.run(&["why", "--json"]);
+    let all: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(all.as_array().map(Vec::len), Some(2), "{all}");
+    assert_eq!(all[0]["reason"]["kind"], "gate", "{all}");
+    assert!(all[0]["submitter"].is_string(), "{all}");
+
+    // An ended job is named with its run.
+    common::write_machine(&machine, 0.0);
+    daemon.wait_for(3, |s| listed(s, "jobs", "vouched"));
+    daemon.end("vouched");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let text = loop {
+        let out = daemon.run(&["why", &vouched.to_string()]);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        if text.contains("ended: run") {
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            break text;
+        }
+        assert!(Instant::now() < deadline, "{out:?}");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        text.starts_with(&format!("job {vouched} ended: run ")),
+        "{text}"
+    );
+    assert!(
+        text.trim_end().ends_with(&format!(
+            "of vouched, exit 137 (taskslash logs {vouched} shows its log)"
+        )),
+        "{text}"
+    );
+    let out = daemon.run(&["why", &vouched.to_string(), "--json"]);
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["kind"], "ended", "{json}");
+    assert_eq!(json["ended"]["as"], "run", "{json}");
 }

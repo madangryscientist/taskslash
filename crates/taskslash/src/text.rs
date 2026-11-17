@@ -34,12 +34,55 @@ pub fn keys_text(keys: &[KeySummary]) -> String {
     out
 }
 
+use std::time::{SystemTime, UNIX_EPOCH};
 use taskslash_core::admission::ordinal;
 use taskslash_core::estimate::{Estimate, Source};
-use taskslash_core::protocol::{KeySummary, Run, Status, worktree};
+use taskslash_core::procfs::epoch_secs;
+use taskslash_core::protocol::{KeySummary, Run, Status, WaitingStatus, worktree};
 
-/// A few lines: CPU, the three `some avg10` pressures, memory, each disk, each mount, each job.
-pub fn status_text(status: &Status) -> String {
+/// How long, read at a glance: `45s`, `1m05s` past a minute, `2h03m` past an hour.
+pub fn duration(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as u64;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// How long a job that started `started_at` (RFC 3339) has run at `now`; `-` when it cannot be read.
+fn running_for(started_at: &str, now: SystemTime) -> String {
+    let now = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    epoch_secs(started_at)
+        .and_then(|at| u64::try_from(at).ok())
+        .map_or("-".to_owned(), |at| duration(now.saturating_sub(at) as f64))
+}
+
+/// One line per waiting job, as `taskslash why` with no job prints it, or `nothing is waiting`.
+pub fn waiting_text(waiting: &[WaitingStatus]) -> String {
+    if waiting.is_empty() {
+        return "nothing is waiting\n".to_owned();
+    }
+    let mut out = String::new();
+    for w in waiting {
+        let reason = if w.reason.is_empty() {
+            "not considered yet"
+        } else {
+            &w.reason
+        };
+        out.push_str(&format!(
+            "job {} {} {}: {reason}\n",
+            w.job,
+            worktree(&w.submitter),
+            w.key
+        ));
+    }
+    out
+}
+
+/// A few lines: CPU, the three `some avg10` pressures, memory, each disk, each mount, each job
+/// (how long it has run at `now`, and its worktree), or that no job runs or waits.
+pub fn status_text(status: &Status, now: SystemTime) -> String {
     let m = &status.machine;
     let pct = |share: f64| format!("{:.0}%", share * 100.0);
     let mut out = format!(
@@ -82,8 +125,12 @@ pub fn status_text(status: &Status) -> String {
             .map_or("-".to_owned(), |t| format!("{t:.2}"));
         let mem = job.mem_mib.map_or("-".to_owned(), |m| m.to_string());
         out.push_str(&format!(
-            "job {}     {} ({}) since {}, {cpu} threads, {mem} MiB\n",
-            job.job, job.key, job.class, job.started_at
+            "job {}  {}  {}  {} ({}) {cpu} threads {mem} MiB\n",
+            job.job,
+            running_for(&job.started_at, now),
+            worktree(&job.submitter),
+            job.key,
+            job.class
         ));
     }
     for w in &status.waiting {
@@ -92,14 +139,18 @@ pub fn status_text(status: &Status) -> String {
             None => w.class.to_string(),
         };
         out.push_str(&format!(
-            "waiting {} {} ({}, {class}) {:.0}s ({} in line): {}\n",
+            "waiting {}  {}  {} ({}, {class}) {:.0}s ({} in line): {}\n",
             w.job,
+            worktree(&w.submitter),
             w.key,
             w.kind,
             w.waited_s,
             ordinal(w.position),
             w.reason
         ));
+    }
+    if status.jobs.is_empty() && status.waiting.is_empty() {
+        out.push_str("no jobs running or waiting\n");
     }
     out
 }
@@ -170,8 +221,44 @@ pub fn table(runs: &[Run]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use taskslash_core::estimate::estimate;
-    use taskslash_core::protocol::{Class, Kind, Launch};
+    use taskslash_core::protocol::{Class, JobStatus, Kind, Launch};
+    use taskslash_core::sampler::MachineSnapshot;
+
+    fn machine() -> MachineSnapshot {
+        let calm = r#"{"some_avg10":0.0,"some_avg60":0.0,"full_avg10":0.0,"full_avg60":0.0}"#;
+        serde_json::from_str(&format!(
+            r#"{{"sampled_at":"2026-11-17T00:00:00.000Z",
+"cpu":{{"threads":16,"threads_online":16,"busy":0.42,"pressure":{calm}}},
+"memory":{{"total_mib":65536,"available_mib":49152,"swap_total_mib":0,"swap_free_mib":0,"pressure":{calm}}},
+"io":{{"pressure":{calm},"disks":[]}},
+"mounts":[],
+"load":[3.5,2.0,1.0]}}"#
+        ))
+        .unwrap()
+    }
+
+    fn waiting(job: u64, key: &str, reason: &str) -> WaitingStatus {
+        WaitingStatus {
+            job,
+            key: key.into(),
+            kind: Kind::Build,
+            class: Class::Normal,
+            effective_class: None,
+            submitter: "/home/me/dev/shop.wt-2".into(),
+            waited_s: 65.0,
+            position: 1,
+            reason: reason.into(),
+            why: None,
+            estimate: estimate(&[], Kind::Build),
+        }
+    }
+
+    /// 2026-11-17T00:00:00Z.
+    fn midnight() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(epoch_secs("2026-11-17T00:00:00.000Z").unwrap() as u64)
+    }
 
     fn run() -> Run {
         Run {
@@ -286,6 +373,82 @@ mod tests {
             lines[1],
             "2026-11-17T09:00:00.000Z      12     -  shop          \
              shop/web:test with a long name past every column"
+        );
+    }
+
+    #[test]
+    fn status_says_when_nothing_runs_or_waits() {
+        let status = Status {
+            machine: machine(),
+            jobs: vec![],
+            waiting: vec![],
+        };
+        let text = status_text(&status, midnight());
+        assert!(text.ends_with("\nno jobs running or waiting\n"), "{text}");
+    }
+
+    #[test]
+    fn a_running_job_shows_how_long_it_has_run_and_its_worktree() {
+        let job = JobStatus {
+            job: 3,
+            key: "shop/web:test".into(),
+            kind: Kind::Test,
+            class: Class::Normal,
+            submitter: "/home/me/dev/shop.wt-1".into(),
+            started_at: "2026-11-16T23:59:48.000Z".into(),
+            cpu_threads: Some(1.31),
+            mem_mib: Some(706),
+            estimate: estimate(&[], Kind::Test),
+            log_path: "/logs/3.log".into(),
+        };
+        let status = Status {
+            machine: machine(),
+            jobs: vec![job],
+            waiting: vec![waiting(
+                4,
+                "shop/web:build",
+                "cpu pressure 90% over the 40% gate",
+            )],
+        };
+        let text = status_text(&status, midnight());
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.contains(&"job 3  12s  shop.wt-1  shop/web:test (normal) 1.31 threads 706 MiB"),
+            "{text}"
+        );
+        assert!(
+            lines.contains(
+                &"waiting 4  shop.wt-2  shop/web:build (build, normal) 65s (1st in line): \
+                  cpu pressure 90% over the 40% gate"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("no jobs running"), "{text}");
+    }
+
+    #[test]
+    fn durations_read_in_seconds_then_minutes_then_hours() {
+        assert_eq!(duration(12.0), "12s");
+        assert_eq!(duration(65.0), "1m05s");
+        assert_eq!(duration(3720.0), "1h02m");
+        assert_eq!(running_for("not a time", midnight()), "-");
+    }
+
+    #[test]
+    fn why_with_no_job_lists_each_waiting_job_or_says_none_waits() {
+        assert_eq!(waiting_text(&[]), "nothing is waiting\n");
+        let text = waiting_text(&[
+            waiting(
+                18,
+                "shop/web:test",
+                "cpu needs 4.0, free 1.5; held by build (job 3)",
+            ),
+            waiting(19, "lint", ""),
+        ]);
+        assert_eq!(
+            text,
+            "job 18 shop.wt-2 shop/web:test: cpu needs 4.0, free 1.5; held by build (job 3)\n\
+             job 19 shop.wt-2 lint: not considered yet\n"
         );
     }
 }

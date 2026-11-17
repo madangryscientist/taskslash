@@ -22,7 +22,8 @@ taskslash run --kind browser --name visual -- bun run visual   # a cost class fo
 taskslash run --cpu 4 --mem 3000 -- bun run visual             # say what it costs (threads, MiB)
 taskslash run --class urgent -- bun run test                     # first in line (default: normal)
 taskslash moon :typecheck :test          # moon targets, one job per target
-taskslash why 7                           # why job 7 waits (or "running")
+taskslash why                             # why each waiting job waits, one line each
+taskslash why 7                           # why job 7 waits ("running", or what became of it)
 taskslash why 7 --json                    # the reason as an object
 taskslash history                         # every key with runs, the most recently run first
 taskslash history gate                    # the estimate of "gate", then what its last 20 runs cost
@@ -285,21 +286,32 @@ job. A higher class never stops, kills or freezes a running job; it is only firs
 `flake` 300, `interactive` 200, `normal` 100, `background` 20. Weights share out a busy CPU between
 running jobs; they do not admit. The plain path has no weight.
 
-A job that waits is told why on stderr when it is queued and every 15 seconds after. The line names
-the first thing that holds it, checked in this order: a gate, the never-seen rule, a resource. A
-resource line lists the running jobs that hold the most of it first:
+A job that waits is told why on stderr when it is queued and every 15 seconds after, with its job
+number. The line names the first thing that holds it, checked in this order: a gate, the never-seen
+rule, a resource. A resource line names the three running jobs that hold the most of it, biggest
+first, and counts the rest. The first line of a job whose key has never run (and that was given
+neither `--cpu` nor `--mem`) also says what its kind is assumed to take:
 
 ```
-taskslash: waiting 45s (2nd in line): cpu needs 4.8, free 1.8; held by cli-db:test (job 3), visual (job 5)
-taskslash: waiting 30s (1st in line): cpu pressure 52% over the 40% gate
+taskslash: job 18 waiting 45s (2nd in line): cpu needs 4.8, free 1.8; held by cli-db:test (job 3), visual (job 5), lint (job 7) and 8 more
+taskslash: job 19 waiting 0s (1st in line): cpu pressure 52% over the 40% gate (never run before: assumed 2.0 threads; --cpu 0.1 says otherwise)
 ```
 
-`taskslash why <job>` prints the same sentence, `running` for a running job, and exits 1 for a job
-the daemon does not hold (an ended job's record is in `history`). With `--json` it prints the
+A daemon older than the job number sends lines without it (`taskslash: waiting 30s ...`).
+
+`taskslash why <job>` prints the same sentence and `running` for a running job. For a job that
+ended since the daemon started it names the run: `job 1 ended: run 3140 of shop/web:test, exit 0
+(taskslash logs 1 shows its log)` (or that it ended without running, or that its run was not
+recorded). It exits 1 for a job the daemon does not know (it forgets ended jobs when it restarts,
+and keeps the newest 1000; `taskslash history` lists the keys). `taskslash why` with no job prints
+one line per waiting job, `job 18 shop.wt-2 shop/web:test: <reason>`, or `nothing is waiting`;
+with `--json`, an array of `{"job", "key", "submitter", "reason"}` (`[]` when nothing waits). With
+`--json` and a job it prints the
 reason: `{"kind":"resource","resource":"cpu","needs":4.8,"free":1.8,"held_by":[{"job":3,"key":
 "cli-db:test","amount":3.0}]}`, `{"kind":"gate","gate":"cpu_pressure","value":52.0,"limit":40.0}`,
-`{"kind":"never_seen","job":3,"key":"..."}`, `{"kind":"behind","job":3,"key":"..."}`, or
-`{"kind":"running"}`. A `taskslash run` stopped
+`{"kind":"never_seen","job":3,"key":"..."}`, `{"kind":"behind","job":3,"key":"..."}`,
+`{"kind":"running"}`, or for an ended job `{"kind":"ended","ended":{"as":"run","run":3140,"key":
+"...","exit_code":0}}` (`as` is also `never_ran`, `unrecorded` or `recording`). A `taskslash run` stopped
 while it waits leaves the queue and its command never runs.
 
 **A fake machine, for tests.** With `TASKSLASH_FAKE_MACHINE=<file>` in its environment the daemon
@@ -312,8 +324,16 @@ tests can set the machine's load and pressure; do not use it otherwise.
 `taskslash status` answers from the daemon's latest machine reading, taken once a second (free
 space every 30 seconds), and lists the running jobs with their last live reading. The plain form is
 a few lines: CPU, the `some avg10` pressures, memory, each disk, each mount, then one line per
-running job and one per waiting job (`waiting 9 visual (browser, background, as normal) 960s (2nd in
-line): ...` for a job whose class waiting has raised).
+running job and one per waiting job, each with the worktree it was submitted from, or `no jobs
+running or waiting`:
+
+```
+job 3  12s  shop.wt-1  shop/web:test (normal) 1.31 threads 706 MiB
+waiting 9  shop.wt-2  visual (browser, background, as normal) 960s (2nd in line): ...
+```
+
+A running job shows how long it has run (`12s`, `1m05s`, `1h02m`) and its last reading (`-` before
+the first one); `as normal` is a class waiting has raised.
 
 | Field (`--json`) | What it is |
 | --- | --- |

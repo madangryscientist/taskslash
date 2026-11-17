@@ -152,20 +152,21 @@ fn two_never_seen_jobs_never_overlap_but_a_seen_one_runs_beside_one() {
 
     let (_, a_err) = finish(a);
     let (_, b_err) = finish(b);
-    let (first, second, second_err) = if b_err.contains("taskslash: waiting ") {
+    let (first, second, second_err) = if b_err.contains(" waiting ") {
         ("new-a", "new-b", &b_err)
     } else {
         ("new-b", "new-a", &a_err)
     };
     let first_err = if first == "new-a" { &a_err } else { &b_err };
-    assert!(
-        !first_err.contains("taskslash: waiting "),
-        "{first}: {first_err}"
-    );
+    assert!(!first_err.contains(" waiting "), "{first}: {first_err}");
     assert!(
         second_err.contains(&format!(
-            "taskslash: waiting 0s (1st in line): another never-seen job is running: {first} (job "
+            " waiting 0s (1st in line): another never-seen job is running: {first} (job "
         )),
+        "{second}: {second_err}"
+    );
+    assert!(
+        second_err.contains("(never run before: assumed 2.0 threads; --cpu 0.1 says otherwise)"),
         "{second}: {second_err}"
     );
     let (one, two) = (daemon.interval(first), daemon.interval(second));
