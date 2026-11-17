@@ -5,8 +5,11 @@
 //! share of the budget first (Dominant Resource Fairness); then the job that has waited longest,
 //! then the lower id. The pass starts each job that fits and walks past one that does not
 //! (backfill), unless that one has waited more than 5 minutes: then nothing behind it starts.
+//! When no managed job runs, the first job the walk reaches that has waited 3 minutes on a CPU or
+//! I/O pressure gate or on the budget starts anyway (the wait cap); a gate stops the walk at the
+//! first job in line, so under one only that job can be capped. Memory and mount gates never are.
 
-use crate::admission::{self, Decision, Demand, Limits, Reason, Resource, Use};
+use crate::admission::{self, Decision, Demand, Gate, Limits, Reason, Resource, Use};
 use crate::sampler::MachineSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -18,6 +21,9 @@ use std::time::{Duration, Instant};
 const RAISE_EVERY: Duration = Duration::from_secs(15 * 60);
 /// How long a job waits before it stops later jobs from passing it.
 pub(crate) const GUARD_AFTER: Duration = Duration::from_secs(5 * 60);
+/// How long a job waits on load TaskSlash does not manage (a CPU or I/O pressure gate, or a
+/// resource budget nothing managed holds) before it starts anyway, when no managed job runs.
+pub(crate) const WAIT_CAP: Duration = Duration::from_secs(3 * 60);
 
 /// A job's priority class, highest first.
 #[derive(
@@ -126,11 +132,13 @@ pub struct Active {
 }
 
 /// What a pass decided: the jobs to start, in the order they start, and every job left waiting
-/// with its 1-based place in line and why it waits.
+/// with its 1-based place in line and why it waits. `capped` names the started jobs that the
+/// wait cap let past what still held them, and that reason.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pass {
     pub start: Vec<u64>,
     pub waiting: Vec<(u64, usize, Reason)>,
+    pub capped: Vec<(u64, Reason)>,
 }
 
 /// The jobs a pass starts, in order. See `pass`.
@@ -149,7 +157,8 @@ pub fn plan(
 /// pass has started), asks `admission::check` against the running set as it grows, and starts it
 /// or passes over it. A gate stops the walk for every job. A job that does not fit (a resource
 /// holds it, not the never-seen rule) and has waited more than `GUARD_AFTER` stops it too, and
-/// every job behind it waits on it.
+/// every job behind it waits on it. With nothing managed running, a job held past `WAIT_CAP` by
+/// a reason `cappable` allows starts anyway, and is reported in `capped`.
 pub fn pass(
     waiting: &[Queued],
     running: &[Active],
@@ -172,20 +181,34 @@ pub fn pass(
         let job = left.remove(next);
         let decision = admission::check(machine, unmanaged, &held, &job.demand, limits);
         let reason = match decision {
-            Decision::Start => {
-                let started = admission::Running {
-                    job: job.id,
-                    key: job.key.clone(),
-                    estimate: job.demand.estimate,
-                    observed: None,
-                    never_seen: job.demand.never_seen,
-                };
-                add(holds.entry(&job.submitter).or_default(), &started);
-                held.push(started);
-                out.start.push(job.id);
-                continue;
+            Decision::Start => None,
+            Decision::Wait(reason) => Some(reason),
+        };
+        let capped = reason.as_ref().is_some_and(|reason| {
+            held.is_empty()
+                && now.saturating_duration_since(job.submitted_at) >= WAIT_CAP
+                && cappable(reason)
+                && admission::gates(machine).iter().all(cappable)
+        });
+        let reason = match reason {
+            Some(reason) if capped => {
+                out.capped.push((job.id, reason));
+                None
             }
-            Decision::Wait(reason) => reason,
+            reason => reason,
+        };
+        let Some(reason) = reason else {
+            let started = admission::Running {
+                job: job.id,
+                key: job.key.clone(),
+                estimate: job.demand.estimate,
+                observed: None,
+                never_seen: job.demand.never_seen,
+            };
+            add(holds.entry(&job.submitter).or_default(), &started);
+            held.push(started);
+            out.start.push(job.id);
+            continue;
         };
         place += 1;
         let gate = matches!(reason, Reason::Gate { .. });
@@ -211,6 +234,19 @@ pub fn pass(
         }
     }
     out
+}
+
+/// Whether the wait cap may start a job past `reason`: load TaskSlash does not manage, which a
+/// wait cannot be shown to end. Memory and mount gates guard against harm, and are never capped.
+fn cappable(reason: &Reason) -> bool {
+    match reason {
+        Reason::Resource { .. } => true,
+        Reason::Gate { gate, .. } => matches!(
+            gate,
+            Gate::CpuPressure | Gate::IoPressure | Gate::IoFullPressure
+        ),
+        Reason::NeverSeen { .. } | Reason::Behind { .. } => false,
+    }
 }
 
 /// The index in `left` of the job that goes first.

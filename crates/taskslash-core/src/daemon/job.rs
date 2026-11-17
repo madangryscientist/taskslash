@@ -1,10 +1,11 @@
 //! One job's connection: queued, started, measured and recorded.
 
 use super::Daemon;
-use crate::admission::ordinal;
+use crate::admission::{Reason, ordinal};
 use crate::estimate::{Source, estimate};
 use crate::logs;
 use crate::measure::{self, Cost, Sampler};
+use crate::order::WAIT_CAP;
 use crate::procfs::rfc3339;
 use crate::protocol::{Class, ClientMessage, DaemonMessage, JobEvent, Kind, Launch, receive, send};
 use crate::scheduler::Job;
@@ -100,6 +101,13 @@ impl Daemon {
             self.admit_locked(&mut scheduler);
             scheduler.waiting(id)
         };
+        // Started in the pass above: `admit` already sent its `Admitted`. A waiting job takes it in
+        // the loop below, which a pass on another thread can send to at any moment.
+        let mut admitted = if waiting.is_none() {
+            started.try_recv().ok()
+        } else {
+            None
+        };
         if let Some((reason, _, position)) = waiting {
             eprintln!("job {id} waiting ({}): {reason}", ordinal(position));
             let _ = send(
@@ -113,7 +121,10 @@ impl Daemon {
             let mut told = Instant::now();
             loop {
                 match started.recv_timeout(WAIT_POLL) {
-                    Ok(()) => break,
+                    Ok(sent) => {
+                        admitted = Some(sent);
+                        break;
+                    }
                     Err(RecvTimeoutError::Timeout) if told.elapsed() >= TELL_EVERY => {
                         told = Instant::now();
                         let now = self.scheduler().waiting(id);
@@ -145,7 +156,8 @@ impl Daemon {
             }
         }
 
-        eprintln!("job {id} started ({class}): {}", argv.join(" "));
+        let capped = admitted.and_then(|a| a.capped);
+        eprintln!("{}", started_line(id, class, argv, capped.as_ref()));
         let sampler = match self.launch {
             Launch::Scope => measure::cgroup_dir(&unit).map(Sampler::start),
             Launch::Plain => None,
@@ -248,6 +260,19 @@ impl Daemon {
     }
 }
 
+/// The daemon's line for a job that starts, which says so when the wait cap let it past what
+/// still held it.
+fn started_line(id: u64, class: Class, argv: &[String], capped: Option<&Reason>) -> String {
+    let argv = argv.join(" ");
+    match capped {
+        None => format!("job {id} started ({class}): {argv}"),
+        Some(reason) => format!(
+            "job {id} started ({class}) past its {} min wait cap: {reason}: {argv}",
+            WAIT_CAP.as_secs() / 60
+        ),
+    }
+}
+
 fn now() -> String {
     rfc3339(SystemTime::now())
 }
@@ -263,4 +288,30 @@ fn hung_up(stream: &UnixStream) -> bool {
     let ready = unsafe { libc::poll(&raw mut fd, 1, 0) };
     // -1 (EINTR and the like) is not a hang up; the next poll asks again.
     ready > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admission::Gate;
+
+    #[test]
+    fn the_start_line_says_when_a_job_started_past_its_wait_cap_and_why() {
+        let argv = ["cargo".to_owned(), "test".to_owned()];
+        assert_eq!(
+            started_line(12, Class::Normal, &argv, None),
+            "job 12 started (normal): cargo test"
+        );
+        let held = Reason::Gate {
+            gate: Gate::CpuPressure,
+            value: 52.0,
+            limit: 40.0,
+            mount: None,
+        };
+        assert_eq!(
+            started_line(12, Class::Normal, &argv, Some(&held)),
+            "job 12 started (normal) past its 3 min wait cap: \
+             cpu pressure 52% over the 40% gate: cargo test"
+        );
+    }
 }

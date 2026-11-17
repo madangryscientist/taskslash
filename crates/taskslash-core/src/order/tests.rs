@@ -216,3 +216,131 @@ fn a_gate_holds_every_job() {
             .all(|w| matches!(w.2, Reason::Gate { .. }))
     );
 }
+
+fn pass_on(m: &MachineSnapshot, unmanaged: &Use, waiting: &[Queued], running: &[Active]) -> Pass {
+    pass(
+        waiting,
+        running,
+        m,
+        unmanaged,
+        &Limits::default(),
+        Clock::new().now(),
+    )
+}
+
+/// A machine whose CPU pressure is over the 40% gate.
+fn cpu_pressed() -> MachineSnapshot {
+    let mut m = machine();
+    m.cpu.pressure.some_avg10 = 52.0;
+    m
+}
+
+#[test]
+fn a_job_held_by_the_cpu_pressure_gate_with_nothing_running_starts_at_its_3_minute_cap() {
+    let clock = Clock::new();
+    let m = cpu_pressed();
+    let job = |waited| [queued(1, Class::Normal, "/a", clock.waited(waited), 1.0)];
+
+    let early = pass_on(&m, &Use::default(), &job(3 * MIN - 1), &[]);
+    assert!(early.start.is_empty());
+    assert!(early.capped.is_empty());
+    assert!(matches!(
+        early.waiting[0].2,
+        Reason::Gate {
+            gate: Gate::CpuPressure,
+            ..
+        }
+    ));
+
+    let capped = pass_on(&m, &Use::default(), &job(3 * MIN), &[]);
+    assert_eq!(capped.start, [1]);
+    assert!(capped.waiting.is_empty());
+    assert_eq!(capped.capped.len(), 1);
+    assert!(matches!(
+        capped.capped[0],
+        (
+            1,
+            Reason::Gate {
+                gate: Gate::CpuPressure,
+                ..
+            }
+        )
+    ));
+}
+
+#[test]
+fn a_job_held_by_unmanaged_cpu_with_nothing_running_starts_at_its_3_minute_cap() {
+    let clock = Clock::new();
+    let busy = Use {
+        cpu: 8.5,
+        mem_mib: 0.0,
+        write_mib_s: 0.0,
+    };
+    let job = |waited| [queued(1, Class::Normal, "/a", clock.waited(waited), 4.0)];
+
+    let early = pass_on(&machine(), &busy, &job(3 * MIN - 1), &[]);
+    assert!(early.start.is_empty());
+    assert!(matches!(
+        &early.waiting[0].2,
+        Reason::Resource { held_by, .. } if held_by.is_empty()
+    ));
+
+    let capped = pass_on(&machine(), &busy, &job(3 * MIN), &[]);
+    assert_eq!(capped.start, [1]);
+    assert!(matches!(capped.capped[0], (1, Reason::Resource { .. })));
+}
+
+#[test]
+fn of_two_jobs_past_the_cap_only_the_first_in_order_starts() {
+    let clock = Clock::new();
+    let waiting = [
+        queued(1, Class::Normal, "/a", clock.waited(5 * MIN), 1.0),
+        queued(2, Class::Normal, "/b", clock.waited(4 * MIN), 1.0),
+    ];
+    let pass = pass_on(&cpu_pressed(), &Use::default(), &waiting, &[]);
+    assert_eq!(pass.start, [1]);
+    assert_eq!(pass.capped.iter().map(|c| c.0).collect::<Vec<_>>(), [1]);
+    assert_eq!(pass.waiting.len(), 1);
+    assert_eq!(pass.waiting[0].0, 2);
+}
+
+#[test]
+fn with_a_managed_job_running_a_job_past_the_cap_still_waits() {
+    let clock = Clock::new();
+    let waiting = [queued(2, Class::Normal, "/a", clock.waited(10 * MIN), 1.0)];
+    let running = [active(1, "/b", 1.0)];
+    let pass = pass_on(&cpu_pressed(), &Use::default(), &waiting, &running);
+    assert!(pass.start.is_empty());
+    assert!(pass.capped.is_empty());
+}
+
+#[test]
+fn the_memory_and_mount_gates_are_never_capped() {
+    let clock = Clock::new();
+    let waiting = [queued(1, Class::Normal, "/a", clock.waited(10 * MIN), 1.0)];
+
+    let mut low = machine();
+    low.memory.available_mib = 1024;
+    let mut pressed = machine();
+    pressed.memory.pressure.some_avg10 = 20.0;
+    let mut full = machine();
+    full.mounts[0].used = 0.95;
+    // A capped gate holding first must not let a job past a memory gate that also holds.
+    let mut both = cpu_pressed();
+    both.memory.available_mib = 1024;
+
+    for (m, gate) in [
+        (low, Gate::MemoryAvailable),
+        (pressed, Gate::MemoryPressure),
+        (full, Gate::Mount),
+        (both, Gate::CpuPressure),
+    ] {
+        let pass = pass_on(&m, &Use::default(), &waiting, &[]);
+        assert!(pass.start.is_empty(), "{gate:?}");
+        assert!(pass.capped.is_empty(), "{gate:?}");
+        assert!(
+            matches!(&pass.waiting[0].2, Reason::Gate { gate: g, .. } if *g == gate),
+            "{gate:?}"
+        );
+    }
+}
