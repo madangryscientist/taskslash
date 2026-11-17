@@ -40,7 +40,14 @@ struct Waiting {
     /// Why it is still waiting, from the last `admit`.
     reason: Option<Reason>,
     /// The connection thread waits on the other end for its start.
-    start: Sender<()>,
+    start: Sender<Admitted>,
+}
+
+/// What `admit` sends a job's connection thread when the job starts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Admitted {
+    /// The reason that still held it, when it started past its wait cap.
+    pub capped: Option<Reason>,
 }
 
 /// A job between its start and its end.
@@ -99,7 +106,7 @@ impl Scheduler {
     }
 
     /// Queues `job`; `admit` sends on `start` when it may run.
-    pub fn submit(&mut self, job: Job, start: Sender<()>) {
+    pub fn submit(&mut self, job: Job, start: Sender<Admitted>) {
         self.queue.push(Waiting {
             job,
             submitted_at: Instant::now(),
@@ -151,7 +158,12 @@ impl Scheduler {
             };
             let unknown = queued.iter().any(|q| q.id == id && q.demand.never_seen);
             // The connection thread is gone only if it panicked; nothing then runs the job.
-            if waiting.start.send(()).is_ok() {
+            let capped = pass
+                .capped
+                .iter()
+                .find(|(capped, _)| *capped == id)
+                .map(|(_, reason)| reason.clone());
+            if waiting.start.send(Admitted { capped }).is_ok() {
                 self.running.insert(
                     id,
                     Running {

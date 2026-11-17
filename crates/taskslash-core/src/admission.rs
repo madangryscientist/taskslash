@@ -221,6 +221,11 @@ pub fn check(
 
 /// The first gate that holds, if any.
 fn gate(m: &MachineSnapshot) -> Option<Reason> {
+    gates(m).into_iter().next()
+}
+
+/// Every gate that holds, in the order `check` tries them.
+pub(crate) fn gates(m: &MachineSnapshot) -> Vec<Reason> {
     let over = |gate, value: f64, limit| {
         (value > limit).then_some(Reason::Gate {
             gate,
@@ -234,30 +239,34 @@ fn gate(m: &MachineSnapshot) -> Option<Reason> {
     } else {
         100.0 * m.memory.available_mib as f64 / m.memory.total_mib as f64
     };
-    over(Gate::CpuPressure, m.cpu.pressure.some_avg10, 40.0)
-        .or_else(|| over(Gate::MemoryPressure, m.memory.pressure.some_avg10, 5.0))
-        .or_else(|| over(Gate::IoFullPressure, m.io.pressure.full_avg10, 5.0))
-        .or_else(|| over(Gate::IoPressure, m.io.pressure.some_avg10, 25.0))
+    let mut held: Vec<Reason> = [
+        over(Gate::CpuPressure, m.cpu.pressure.some_avg10, 40.0),
+        over(Gate::MemoryPressure, m.memory.pressure.some_avg10, 5.0),
+        over(Gate::IoFullPressure, m.io.pressure.full_avg10, 5.0),
+        over(Gate::IoPressure, m.io.pressure.some_avg10, 25.0),
         // Under the limit holds here, so the comparison is turned around.
-        .or_else(|| {
-            (available < 10.0).then_some(Reason::Gate {
-                gate: Gate::MemoryAvailable,
-                value: available,
-                limit: 10.0,
-                mount: None,
-            })
-        })
-        .or_else(|| {
-            m.mounts
-                .iter()
-                .find(|mount| mount.used > 0.9)
-                .map(|mount| Reason::Gate {
-                    gate: Gate::Mount,
-                    value: mount.used * 100.0,
-                    limit: 90.0,
-                    mount: Some(mount.path.clone()),
-                })
-        })
+        (available < 10.0).then_some(Reason::Gate {
+            gate: Gate::MemoryAvailable,
+            value: available,
+            limit: 10.0,
+            mount: None,
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    held.extend(
+        m.mounts
+            .iter()
+            .find(|mount| mount.used > 0.9)
+            .map(|mount| Reason::Gate {
+                gate: Gate::Mount,
+                value: mount.used * 100.0,
+                limit: 90.0,
+                mount: Some(mount.path.clone()),
+            }),
+    );
+    held
 }
 
 /// What the running jobs hold, per resource: the sum of `max(estimate, observed)`.

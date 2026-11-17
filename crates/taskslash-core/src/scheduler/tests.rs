@@ -5,7 +5,7 @@ use crate::admission::tests::machine;
 use crate::estimate::estimate;
 use std::sync::mpsc::{self, Receiver};
 
-fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<()> {
+fn submit(s: &mut Scheduler, id: u64, key: &str) -> Receiver<Admitted> {
     let (start, started) = mpsc::channel();
     let job = Job {
         id,

@@ -188,13 +188,20 @@ Three resources count: CPU (threads), memory (MiB) and disk writes (MiB/s).
   30 one second samples. Machine CPU is `cpu.busy` times `cpu.threads`,
   memory `total_mib - available_mib`, writes the sum over the disks.
 - **A job fits** when, for every resource, committed plus its estimate is within the budget.
-- **Gates:** while any holds nothing starts: CPU `some avg10` over 40, memory `some avg10` over 5,
+- **Gates:** while any holds nothing starts (but see the wait cap below): CPU `some avg10` over 40, memory `some avg10` over 5,
   I/O `full avg10` over 5 or `some avg10` over 25, `available_mib` under 10% of `total_mib`, a
   watched mount over 90% used.
 - **Never seen:** a key is seen once one of its runs has finished. At most one job whose key was
   never seen runs at a time, unless the caller gave both `--cpu` and `--mem`.
 - **Too big to ever fit:** a job whose estimate alone is over a budget starts when no other job is
   running and no gate holds.
+- **Wait cap:** when no managed job is running, the first job in order that has waited 3 minutes
+  on load TaskSlash does not manage starts anyway: on the CPU pressure gate, either I/O pressure
+  gate, or a budget that unmanaged use fills. Only one starts this way at a time, since once it
+  runs a managed job does. The memory pressure, memory available and mount gates are never capped
+  (running out of memory or disk does harm a wait avoids), so the cap applies only when none of
+  them holds. The daemon's start line says so, e.g. `job 12 started (normal) past its 3 min wait
+  cap: cpu pressure 52% over the 40% gate: <command>`.
 
 `--cpu <threads>` and `--mem <MiB>` on `run` replace the learned estimate for that run.
 
