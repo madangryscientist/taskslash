@@ -276,14 +276,14 @@ mod tests {
             run: Some(3140),
             log_path: Some("/l".into()),
             key: Some("taskslash/test".into()),
-            submitter: Some("/home/j/dev/taskslash.tk-37".into()),
+            submitter: Some("/home/j/dev/taskslash-wt".into()),
             exit_code: Some(2),
             started_at: Some("2026-11-17T18:22:00.000Z".into()),
             ..LogFound::default()
         };
         assert_eq!(
             header(&run, fixed),
-            "run 3140 taskslash/test in taskslash.tk-37, exit 2, 2026-11-17 20:22"
+            "run 3140 taskslash/test in taskslash-wt, exit 2, 2026-11-17 20:22"
         );
         let gone = LogFound {
             exit_code: None,

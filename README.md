@@ -83,8 +83,8 @@ The run's row keeps the path of a deleted log.
 that says whose it is, so the log itself stays pipeable:
 
 ```
-run 3140 taskslash/test in taskslash.tk-37, exit 2, 2026-11-17 20:22
-job 12 taskslash/test in taskslash.tk-37, running since 20:22
+run 3140 taskslash/test in taskslash-wt, exit 2, 2026-11-17 20:22
+job 12 taskslash/test in taskslash-wt, running since 20:22
 ```
 
 The worktree is the last part of the submitter's path, as `top` and `history` show it, and the time
