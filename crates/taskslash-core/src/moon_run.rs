@@ -6,6 +6,7 @@ use crate::capture::pump;
 use crate::client::{Demand, Job, Report, run_job};
 use crate::moon::{self, Node};
 use crate::protocol::Class;
+use std::env;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Write};
@@ -64,11 +65,16 @@ pub fn moon(
         })?
         .to_path_buf();
     let binary = moon::moon_binary(&root)?;
-    let output = Command::new(&binary)
+    let mut query = Command::new(&binary);
+    query
         .args(["query", "tasks"])
         .current_dir(&root)
         .stdin(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some(path) = gate_path(&root, env::var_os("PATH")) {
+        query.env("PATH", path);
+    }
+    let output = query
         .output()
         .map_err(|e| Error::new(format!("cannot run {}: {e}", binary.display())))?;
     if !output.status.success() {
@@ -95,6 +101,21 @@ pub fn moon(
         .and_then(|()| out.flush())
         .map_err(|e| Error::new(format!("cannot write the summary: {e}")))?;
     Ok(i32::from(ends.iter().any(|e| e.state != State::Pass)))
+}
+
+/// `PATH` with `<root>/node_modules/.bin` in front of `inherited`, as `bun run` sets it for a
+/// script at the root, so a moon task's bare package binary (`tsc`, `oxlint`) is found. `None` when
+/// `PATH` is unset (a child then gets only the workspace's bin, and cannot find `systemd-run`),
+/// when that directory does not exist, or when the joined path is not valid: then `PATH` is left as
+/// it was.
+fn gate_path(root: &Path, inherited: Option<OsString>) -> Option<OsString> {
+    let inherited = inherited?;
+    let bin = root.join("node_modules/.bin");
+    if !bin.is_dir() {
+        return None;
+    }
+    let dirs = std::iter::once(bin).chain(env::split_paths(&inherited));
+    env::join_paths(dirs).ok()
 }
 
 /// `<target> <pass|fail|skipped> <wall>[ cached]`, a newline.
@@ -190,7 +211,10 @@ fn run_node(
         label: Some(&node.target),
     };
     let mut wall = Duration::ZERO;
-    let result = run_job(socket, &job, |command, log| {
+    let result = run_job(socket, &job, |mut command, log| {
+        if let Some(path) = gate_path(root, env::var_os("PATH")) {
+            command.env("PATH", path);
+        }
         let clock = Instant::now();
         let ran = exec(command, &node.target, log);
         wall = clock.elapsed();

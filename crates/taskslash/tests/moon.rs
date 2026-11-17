@@ -249,3 +249,29 @@ fn each_targets_stdout_and_stderr_land_in_its_own_log() {
     assert!(!typecheck_log.contains("b-test"), "{typecheck_log}");
     assert!(typecheck_log.contains("b:typecheck"), "{typecheck_log}");
 }
+
+/// A bare package binary (`tsc`, `oxlint`) is a moon command that moon finds on the workspace's
+/// `node_modules/.bin`, which `bun run` puts on `PATH` for the same command. The test's `PATH` has
+/// no `node_modules/.bin` in it, so only `taskslash moon` putting the workspace's `.bin` in front
+/// can find the binary: without that it fails with 127.
+#[test]
+fn a_bare_binary_in_the_workspaces_node_modules_bin_runs_without_a_path_prefix() {
+    let daemon = Scratch::new().daemon();
+    let bin = daemon.scratch.workspace.join("node_modules/.bin");
+    let tool = bin.join("fixture-tool");
+    fs::write(&tool, "#!/bin/sh\necho fixture-tool-ran\n").unwrap();
+    fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::env::split_paths(&inherited).filter(|dir| !dir.ends_with("node_modules/.bin")),
+    )
+    .unwrap();
+    let out = daemon
+        .scratch
+        .command(BIN, &["moon", "b:bare"])
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(states(&summary(&out))["b:bare"], "pass", "{out:?}");
+}
