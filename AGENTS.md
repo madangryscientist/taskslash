@@ -63,6 +63,7 @@ hardcoded `/tmp`.
 - Stage files by name or `git add -A`; never `git commit -am` (it drops new files).
 - No `Co-Authored-By` trailer and no AI attribution line, in a commit or a pull request.
 - No em dash or en dash anywhere (`scripts/check-dashes.ts` fails the lint on one).
+- A pull request that changes what TaskSlash does, where it runs or its licence updates [`FACTS.md`](FACTS.md) in the same pull request, and moves its "Checked against" line to the commit and date it was checked.
 
 ## Invariants
 
