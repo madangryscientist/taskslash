@@ -5,8 +5,9 @@
 //! share of the budget first (Dominant Resource Fairness); then the job that has waited longest,
 //! then the lower id. The pass starts each job that fits and walks past one that does not
 //! (backfill), unless that one has waited more than 5 minutes: then nothing behind it starts.
-//! When no managed job runs, the first job that has waited 3 minutes on a CPU or I/O pressure gate
-//! or on the budget starts anyway (the wait cap); the memory and mount gates are never capped.
+//! When no managed job runs, the first job the walk reaches that has waited 3 minutes on a CPU or
+//! I/O pressure gate or on the budget starts anyway (the wait cap); a gate stops the walk at the
+//! first job in line, so under one only that job can be capped. Memory and mount gates never are.
 
 use crate::admission::{self, Decision, Demand, Gate, Limits, Reason, Resource, Use};
 use crate::sampler::MachineSnapshot;

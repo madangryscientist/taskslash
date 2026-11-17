@@ -195,9 +195,10 @@ Three resources count: CPU (threads), memory (MiB) and disk writes (MiB/s).
   never seen runs at a time, unless the caller gave both `--cpu` and `--mem`.
 - **Too big to ever fit:** a job whose estimate alone is over a budget starts when no other job is
   running and no gate holds.
-- **Wait cap:** when no managed job is running, the first job in order that has waited 3 minutes
-  on load TaskSlash does not manage starts anyway: on the CPU pressure gate, either I/O pressure
-  gate, or a budget that unmanaged use fills. Only one starts this way at a time, since once it
+- **Wait cap:** when no managed job is running, a job that has waited 3 minutes on load TaskSlash
+  does not manage starts anyway: on the CPU pressure gate, either I/O pressure gate, or a budget
+  that unmanaged use fills. Under a gate only the job first in line is looked at, so the cap starts
+  nothing until that job has waited 3 minutes. Only one starts this way at a time, since once it
   runs a managed job does. The memory pressure, memory available and mount gates are never capped
   (running out of memory or disk does harm a wait avoids), so the cap applies only when none of
   them holds. The daemon's start line says so, e.g. `job 12 started (normal) past its 3 min wait

@@ -101,8 +101,13 @@ impl Daemon {
             self.admit_locked(&mut scheduler);
             scheduler.waiting(id)
         };
-        // Started in the pass above: `admit` already sent its `Admitted`.
-        let mut admitted = started.try_recv().ok();
+        // Started in the pass above: `admit` already sent its `Admitted`. A waiting job takes it in
+        // the loop below, which a pass on another thread can send to at any moment.
+        let mut admitted = if waiting.is_none() {
+            started.try_recv().ok()
+        } else {
+            None
+        };
         if let Some((reason, _, position)) = waiting {
             eprintln!("job {id} waiting ({}): {reason}", ordinal(position));
             let _ = send(
