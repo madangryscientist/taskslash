@@ -298,7 +298,7 @@ pub fn unmanaged(machine: &MachineSnapshot, managed: &Use) -> Use {
 }
 
 mod text;
-pub use text::{ordinal, waiting_line};
+pub use text::{Waiting, ordinal, waiting_line};
 
 #[cfg(test)]
 pub(crate) mod tests;

@@ -176,3 +176,52 @@ fn where_keeps_a_full_path_or_a_directory_name() {
     assert!(!submitted_from("/dev/shop", "hop"));
     assert!(submitted_from("shop", "shop"));
 }
+
+#[test]
+fn an_older_daemons_waiting_reads_with_no_job_number() {
+    let line = r#"{"type":"waiting","reason":{"kind":"behind","job":3,"key":"k"},"waited_s":15,"position":2}"#;
+    let message: DaemonMessage = serde_json::from_str(line).unwrap();
+    assert_eq!(
+        message,
+        DaemonMessage::Waiting {
+            job: None,
+            reason: Reason::Behind {
+                job: 3,
+                key: "k".into()
+            },
+            waited_s: 15,
+            position: 2,
+            never_seen: false,
+            assumed_threads: None,
+        }
+    );
+}
+
+#[test]
+fn an_ended_job_reads_as_its_run_or_why_it_has_none() {
+    let run = JobEnded::Run {
+        run: 3140,
+        key: "shop/web:test".into(),
+        exit_code: Some(0),
+    };
+    assert_eq!(
+        run.sentence(1),
+        "job 1 ended: run 3140 of shop/web:test, exit 0 (taskslash logs 1 shows its log)"
+    );
+    assert_eq!(
+        JobEnded::NeverRan.sentence(1),
+        "job 1 ended without running (it left the queue, or its client went before it started)"
+    );
+    assert_eq!(
+        JobEnded::Unrecorded.sentence(1),
+        "job 1 ended, but its run was not recorded"
+    );
+    assert_eq!(
+        JobEnded::Recording.sentence(1),
+        "job 1 just ended; its run is being recorded, try again in a moment"
+    );
+    assert_eq!(
+        ended_json(&run),
+        "{\"kind\":\"ended\",\"ended\":{\"as\":\"run\",\"run\":3140,\"key\":\"shop/web:test\",\"exit_code\":0}}\n"
+    );
+}

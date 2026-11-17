@@ -3,6 +3,7 @@
 
 use super::Connection;
 use crate::Error;
+use crate::procfs::epoch_secs;
 use crate::protocol::{ClientMessage, DaemonMessage, JobState, LogFound, LogSelect, worktree};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -185,29 +186,6 @@ unsafe extern "C" {
     fn tzset();
 }
 
-/// Seconds since the epoch of `at`, RFC 3339 in UTC as the daemon writes it.
-fn epoch_secs(at: &str) -> Option<i64> {
-    let at = at.strip_suffix('Z').unwrap_or(at);
-    let (date, time) = at.split_once('T')?;
-    let mut date = date.splitn(3, '-').map(str::parse::<i64>);
-    let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
-    let time = time.split('.').next()?;
-    let mut time = time.splitn(3, ':').map(str::parse::<i64>);
-    let (hour, minute, second) = (time.next()?.ok()?, time.next()?.ok()?, time.next()?.ok()?);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    // Days since 1970-01-01 from a civil date (Howard Hinnant's algorithm), as `rfc3339` inverts.
-    let year = year - i64::from(month <= 2);
-    let era = year.div_euclid(400);
-    let yoe = year.rem_euclid(400);
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
-}
-
 /// Writes what job `job`'s log at `path` holds; with `follow`, then what is added until the job
 /// ends. A log its client has not created yet reads as empty.
 fn running(
@@ -258,8 +236,8 @@ fn holds(socket: &Path, job: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogFound, LogSelect, epoch_secs, header, local_time, logs};
-    use crate::procfs::rfc3339;
+    use super::{LogFound, LogSelect, header, local_time, logs};
+    use crate::procfs::{epoch_secs, rfc3339};
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;

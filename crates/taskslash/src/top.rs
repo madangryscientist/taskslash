@@ -5,6 +5,7 @@
 //! thin shell: it polls `status` once a second and follows the events on threads of their own,
 //! reads the selected job's log every 250 ms, and passes keys on.
 
+use crate::text::duration;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -388,16 +389,6 @@ pub fn clean(raw: &[u8]) -> String {
         }
     }
     out
-}
-
-/// `1m05s`, `45s`, `2h03m`.
-fn duration(seconds: f64) -> String {
-    let s = seconds.max(0.0).round() as u64;
-    match s {
-        0..60 => format!("{s}s"),
-        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
-        _ => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
-    }
 }
 
 /// How a finished job ended. A job that never started has no exit code (the daemon sends null).

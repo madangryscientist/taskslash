@@ -96,12 +96,13 @@ impl Daemon {
             log: log.clone(),
         };
         let (start, started) = mpsc::channel();
-        let waiting = {
+        let (waiting, never_seen) = {
             let mut scheduler = self.scheduler();
             scheduler.submit(job, start);
             self.admit_locked(&mut scheduler);
-            scheduler.waiting(id)
+            (scheduler.waiting(id), scheduler.never_seen(id))
         };
+        let assumed_threads = never_seen.then(|| kind.default_cpu_threads());
         // Started in the pass above: `admit` already sent its `Admitted`. A waiting job takes it in
         // the loop below, which a pass on another thread can send to at any moment.
         let mut admitted = if waiting.is_none() {
@@ -114,9 +115,12 @@ impl Daemon {
             let _ = send(
                 writer,
                 &DaemonMessage::Waiting {
+                    job: Some(id),
                     reason,
                     waited_s: 0,
                     position,
+                    never_seen,
+                    assumed_threads,
                 },
             );
             let mut told = Instant::now();
@@ -128,14 +132,18 @@ impl Daemon {
                     }
                     Err(RecvTimeoutError::Timeout) if told.elapsed() >= TELL_EVERY => {
                         told = Instant::now();
+                        // The never-run hint goes on the first line only, so it is not sent again.
                         let now = self.scheduler().waiting(id);
                         if let Some((reason, waited_s, position)) = now {
                             let _ = send(
                                 writer,
                                 &DaemonMessage::Waiting {
+                                    job: Some(id),
                                     reason,
                                     waited_s,
                                     position,
+                                    never_seen: false,
+                                    assumed_threads: None,
                                 },
                             );
                         }

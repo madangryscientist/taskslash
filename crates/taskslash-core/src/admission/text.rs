@@ -4,6 +4,9 @@ use super::{Gate, Reason, Resource};
 use crate::order::GUARD_AFTER;
 use std::fmt;
 
+/// How many holders a resource reason names, the biggest first; the rest are counted.
+const HOLDERS_NAMED: usize = 3;
+
 /// The plain sentence `taskslash why`, the waiting line and `status` print.
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -59,11 +62,17 @@ impl fmt::Display for Reason {
                 if held_by.is_empty() {
                     return f.write_str("work taskslash does not manage");
                 }
+                // The biggest holders explain the wait; the rest are only counted.
                 let names: Vec<String> = held_by
                     .iter()
+                    .take(HOLDERS_NAMED)
                     .map(|h| format!("{} (job {})", h.key, h.job))
                     .collect();
-                f.write_str(&names.join(", "))
+                f.write_str(&names.join(", "))?;
+                match held_by.len().saturating_sub(HOLDERS_NAMED) {
+                    0 => Ok(()),
+                    more => write!(f, " and {more} more"),
+                }
             }
         }
     }
@@ -81,10 +90,29 @@ pub fn ordinal(n: usize) -> String {
     format!("{n}{suffix}")
 }
 
-/// The stderr line a waiting `taskslash run` prints.
-pub fn waiting_line(reason: &Reason, waited_s: u64, position: usize) -> String {
+/// One waiting line, as the daemon reports it.
+#[derive(Debug, Clone, Copy)]
+pub struct Waiting<'a> {
+    /// The job's number; `None` from a daemon older than it, and the line then leaves it out.
+    pub job: Option<u64>,
+    pub reason: &'a Reason,
+    pub waited_s: u64,
+    pub position: usize,
+    /// The threads its kind is assumed to take, when the hint that its key never ran is due.
+    pub never_run: Option<f64>,
+}
+
+/// The stderr line a waiting `taskslash run` prints:
+/// `taskslash: job 18 waiting 0s (1st in line): <reason>`, and the never-run hint when it is due.
+pub fn waiting_line(w: &Waiting<'_>) -> String {
+    let job = w.job.map_or(String::new(), |job| format!("job {job} "));
+    let hint = w.never_run.map_or(String::new(), |threads| {
+        format!(" (never run before: assumed {threads:.1} threads; --cpu 0.1 says otherwise)")
+    });
     format!(
-        "taskslash: waiting {waited_s}s ({} in line): {reason}",
-        ordinal(position)
+        "taskslash: {job}waiting {}s ({} in line): {}{hint}",
+        w.waited_s,
+        ordinal(w.position),
+        w.reason
     )
 }

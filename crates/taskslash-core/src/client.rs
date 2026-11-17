@@ -6,13 +6,13 @@
 //! `taskslash why` why a job waits, and `taskslash events` and `taskslash top` follow the job events.
 
 use crate::Error;
-use crate::admission::{Reason, waiting_line};
+use crate::admission::{Reason, Waiting, waiting_line};
 use crate::capture;
 use crate::estimate::Estimate;
 use crate::launch;
 use crate::protocol::{
-    Class, ClientMessage, DaemonMessage, JobEvent, JobState, KeySummary, Kind, Launch, Run, Status,
-    receive, send, submitted_from,
+    Class, ClientMessage, DaemonMessage, JobEnded, JobEvent, JobState, KeySummary, Kind, Launch,
+    Run, Status, receive, send, submitted_from,
 };
 use std::env;
 use std::ffi::OsString;
@@ -157,6 +157,8 @@ pub(crate) fn run_job(
         submitter: submitter(job.cwd).to_string_lossy().into_owned(),
     };
     let mut reply = daemon.ask(&submit)?;
+    // The never-run hint goes on the first waiting line only, and not when the caller gave a cost.
+    let mut hint_due = job.demand.cpu.is_none() && job.demand.mem_mib.is_none();
     let (id, unit, launch, log) = loop {
         match reply {
             DaemonMessage::Start {
@@ -166,11 +168,22 @@ pub(crate) fn run_job(
                 log,
             } => break (job, unit, launch, log),
             DaemonMessage::Waiting {
+                job: number,
                 reason,
                 waited_s,
                 position,
+                never_seen,
+                assumed_threads,
             } => {
-                let line = waiting_line(&reason, waited_s, position);
+                let never_run = assumed_threads.filter(|_| hint_due && never_seen);
+                hint_due = false;
+                let line = waiting_line(&Waiting {
+                    job: number,
+                    reason: &reason,
+                    waited_s,
+                    position,
+                    never_run,
+                });
                 match job.label {
                     Some(label) => eprintln!(
                         "taskslash: {label}: {}",
@@ -283,9 +296,18 @@ pub fn status(socket: &Path) -> Result<Status, Error> {
     }
 }
 
-/// Where job `job` is: waiting (with its reason, seconds waited and place in line), or running.
-/// An `Err` when the daemon does not hold it.
-pub fn why(socket: &Path, job: u64) -> Result<Option<(Reason, u64, usize)>, Error> {
+/// Where a job is, as `why` finds it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Whereabouts {
+    /// Waiting, with its reason, the seconds it has waited and its place in line.
+    Waiting(Reason, u64, usize),
+    Running,
+    /// Ended since the daemon started.
+    Ended(JobEnded),
+}
+
+/// Where job `job` is. An `Err` when the daemon does not know it.
+pub fn why(socket: &Path, job: u64) -> Result<Whereabouts, Error> {
     let mut daemon = Connection::open(socket)?;
     match daemon.ask(&ClientMessage::Why { job })? {
         DaemonMessage::Why {
@@ -294,13 +316,21 @@ pub fn why(socket: &Path, job: u64) -> Result<Option<(Reason, u64, usize)>, Erro
             waited_s,
             position,
             ..
-        } => Ok(Some((reason, waited_s.unwrap_or(0), position.unwrap_or(1)))),
+        } => Ok(Whereabouts::Waiting(
+            reason,
+            waited_s.unwrap_or(0),
+            position.unwrap_or(1),
+        )),
         DaemonMessage::Why {
             state: JobState::Running,
             ..
-        } => Ok(None),
+        } => Ok(Whereabouts::Running),
+        DaemonMessage::Why {
+            ended: Some(ended), ..
+        } => Ok(Whereabouts::Ended(ended)),
         DaemonMessage::Why { .. } => Err(Error::new(format!(
-            "job {job} not found (an ended job's record is in history)"
+            "job {job} not found: the daemon forgets ended jobs when it restarts and keeps only \
+             the newest 1000 ('taskslash history' lists the keys, and each key's runs)"
         ))),
         other => Err(Error::new(format!("unexpected reply {other:?}"))),
     }

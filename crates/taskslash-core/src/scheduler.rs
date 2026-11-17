@@ -39,6 +39,8 @@ struct Waiting {
     submitted_at: Instant,
     /// Why it is still waiting, from the last `admit`.
     reason: Option<Reason>,
+    /// Whether the last `admit` counted it as never seen.
+    never_seen: bool,
     /// The connection thread waits on the other end for its start.
     start: Sender<Admitted>,
 }
@@ -111,6 +113,7 @@ impl Scheduler {
             job,
             submitted_at: Instant::now(),
             reason: None,
+            never_seen: false,
             start,
         });
     }
@@ -180,6 +183,7 @@ impl Scheduler {
         for (id, _, reason) in pass.waiting {
             if let Some(mut waiting) = queue.remove(&id) {
                 waiting.reason = Some(reason);
+                waiting.never_seen = queued.iter().any(|q| q.id == id && q.demand.never_seen);
                 self.queue.push(waiting);
             }
         }
@@ -192,6 +196,12 @@ impl Scheduler {
         let w = &self.queue[at];
         let reason = w.reason.clone()?;
         Some((reason, w.submitted_at.elapsed().as_secs(), at + 1))
+    }
+
+    /// Whether waiting job `id` was counted as never seen in the last pass: its key has no finished
+    /// run and its caller did not give both `--cpu` and `--mem`. False when it is not waiting.
+    pub fn never_seen(&self, id: u64) -> bool {
+        self.queue.iter().any(|w| w.job.id == id && w.never_seen)
     }
 
     /// Where job `id` is and, when it waits, why, how long and its place in line.

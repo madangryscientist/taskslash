@@ -9,7 +9,8 @@ use crate::launch;
 use crate::logs::{self, Retention};
 use crate::procfs;
 use crate::protocol::{
-    ClientMessage, DaemonMessage, Kind, Launch, LogFound, LogSelect, Run, Status, receive, send,
+    ClientMessage, DaemonMessage, JobEnded, JobState, Kind, Launch, LogFound, LogSelect, Run,
+    Status, receive, send,
 };
 use crate::sampler::{FileSampler, MachineSampler, MachineSnapshot, ProcSampler};
 use crate::scheduler::{Scheduler, lock};
@@ -362,12 +363,25 @@ impl Daemon {
         }
     }
 
-    /// Where job `id` is and, when it waits, why.
+    /// Where job `id` is and, when it waits, why; when it ended since the daemon started, what
+    /// became of it.
     fn why(&self, job: u64) -> DaemonMessage {
         let (state, waiting) = self.scheduler().whereabouts(job);
         let (reason, waited_s, position) = match waiting {
             Some((reason, waited_s, position)) => (Some(reason), Some(waited_s), Some(position)),
             None => (None, None, None),
+        };
+        // Asked after the scheduler, as `log` does: a job is remembered as ended before it leaves.
+        let ended = match (state, self.ended_job(job)) {
+            (JobState::NotFound, Some(ended)) => match self.job_ended_as(ended) {
+                Ok(ended) => Some(ended),
+                Err(e) => {
+                    return DaemonMessage::Error {
+                        message: e.to_string(),
+                    };
+                }
+            },
+            _ => None,
         };
         DaemonMessage::Why {
             job,
@@ -375,7 +389,25 @@ impl Daemon {
             reason,
             waited_s,
             position,
+            ended,
         }
+    }
+
+    /// An ended job as `why` reports it; a run that is not in the store reads as unrecorded.
+    fn job_ended_as(&self, ended: Ended) -> Result<JobEnded, Error> {
+        Ok(match ended {
+            Ended::Run(id) => match self.store().run(id)? {
+                Some(run) => JobEnded::Run {
+                    run: run.id,
+                    key: run.key,
+                    exit_code: run.exit_code,
+                },
+                None => JobEnded::Unrecorded,
+            },
+            Ended::Recording => JobEnded::Recording,
+            Ended::Unrecorded => JobEnded::Unrecorded,
+            Ended::NoRun => JobEnded::NeverRan,
+        })
     }
 
     fn admit(&self) {

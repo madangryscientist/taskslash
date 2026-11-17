@@ -14,11 +14,12 @@ use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
-use taskslash_core::admission::waiting_line;
+use taskslash_core::Whereabouts;
+use taskslash_core::admission::{Waiting, waiting_line};
 use taskslash_core::plugin;
 use taskslash_core::protocol::{Class, Kind, LogSelect};
 use taskslash_core::{Error, HISTORY_LIMIT};
-use text::{estimate_text, keys_text, status_text, table};
+use text::{estimate_text, keys_text, status_text, table, waiting_text};
 
 mod text;
 mod top;
@@ -42,7 +43,8 @@ enum Commands {
     /// considered by class (raised one class per 15 minutes waited), then the submitting
     /// worktree's share of the machine, then time waited. A later job that fits may start
     /// before an earlier one, unless the earlier one has waited over 5 minutes. A waiting run prints
-    /// `taskslash: waiting <n>s (<place> in line): <reason>` on stderr when queued and every 15 s.
+    /// `taskslash: job <n> waiting <n>s (<place> in line): <reason>` on stderr when queued and every
+    /// 15 s; the first line of a key that never ran adds the CPU its kind is assumed to take.
     ///
     /// Exits with the command's exit code (128+N when signal N killed it, 127 when it cannot be
     /// started). Exits 1 when no daemon is running, which a command's own exit 1 can also mean.
@@ -159,12 +161,17 @@ enum Commands {
         #[arg(short, long)]
         follow: bool,
     },
-    /// Say why a job waits, or `running`. Exits 1 for a job the daemon does not hold (an ended
-    /// job's record is in `history`).
+    /// Say why a job waits, `running`, or what became of it; with no job, why each job waits.
+    ///
+    /// With no job, one line per waiting job (`job <n> <worktree> <key>: <reason>`), or `nothing is
+    /// waiting`. A job that ended since the daemon started is named with its run and exit code.
+    /// Exits 1 for a job the daemon does not know (it forgets ended jobs when it restarts and keeps
+    /// the newest 1000; `taskslash history` lists the keys, and each key's runs).
     Why {
-        /// The job's number, as `status` shows it.
-        job: u64,
-        /// Print the reason object (`{"kind":"running"}` for a running job).
+        /// The job's number, as `status` and a waiting `run` show it.
+        job: Option<u64>,
+        /// Print the reason object (`{"kind":"running"}` for a running job, `{"kind":"ended",...}`
+        /// for an ended one); with no job, an array of `{"job","key","submitter","reason"}`.
         #[arg(long)]
         json: bool,
     },
@@ -366,6 +373,29 @@ fn no_runs(
     Ok(Error::new(message))
 }
 
+/// What `taskslash why <job>` prints for job `job`, found `at`.
+fn why_text(at: Whereabouts, job: u64, json: bool) -> String {
+    match (at, json) {
+        (Whereabouts::Waiting(reason, _, _), true) => {
+            taskslash_core::protocol::reason_json(&reason)
+        }
+        (Whereabouts::Waiting(reason, waited_s, position), false) => {
+            let line = waiting_line(&Waiting {
+                job: Some(job),
+                reason: &reason,
+                waited_s,
+                position,
+                never_run: None,
+            });
+            format!("{}\n", line.trim_start_matches("taskslash: "))
+        }
+        (Whereabouts::Running, true) => "{\"kind\":\"running\"}\n".to_owned(),
+        (Whereabouts::Running, false) => "running\n".to_owned(),
+        (Whereabouts::Ended(ended), true) => taskslash_core::protocol::ended_json(&ended),
+        (Whereabouts::Ended(ended), false) => format!("{}\n", ended.sentence(job)),
+    }
+}
+
 fn dispatch(command: Commands) -> Result<i32, Error> {
     let socket = taskslash_core::socket_path;
     match command {
@@ -451,14 +481,17 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
             .map(|()| 0)
         }
         Commands::Why { job, json } => {
-            let text = match (taskslash_core::why(&socket()?, job)?, json) {
-                (Some((reason, _, _)), true) => taskslash_core::protocol::reason_json(&reason),
-                (Some((reason, waited_s, position)), false) => {
-                    let line = waiting_line(&reason, waited_s, position);
-                    format!("{}\n", line.trim_start_matches("taskslash: "))
+            let socket = socket()?;
+            let text = match job {
+                None => {
+                    let status = taskslash_core::status(&socket)?;
+                    if json {
+                        taskslash_core::protocol::waiting_json(&status.waiting)
+                    } else {
+                        waiting_text(&status.waiting)
+                    }
                 }
-                (None, true) => "{\"kind\":\"running\"}\n".to_owned(),
-                (None, false) => "running\n".to_owned(),
+                Some(job) => why_text(taskslash_core::why(&socket, job)?, job, json),
             };
             write!(io::stdout(), "{text}")
                 .map_err(|e| Error::new(format!("cannot write the reason: {e}")))?;
@@ -478,7 +511,7 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
             let text = if json {
                 taskslash_core::protocol::status_json(status)
             } else {
-                status_text(&status)
+                status_text(&status, std::time::SystemTime::now())
             };
             write!(io::stdout(), "{text}")
                 .map_err(|e| Error::new(format!("cannot write the status: {e}")))?;
