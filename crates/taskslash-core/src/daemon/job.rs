@@ -8,8 +8,10 @@ use crate::logs;
 use crate::measure::{self, Cost, Sampler};
 use crate::order::WAIT_CAP;
 use crate::procfs::rfc3339;
-use crate::protocol::{Class, ClientMessage, DaemonMessage, JobEvent, Kind, Launch, receive, send};
-use crate::scheduler::Job;
+use crate::protocol::{
+    Class, ClientMessage, DaemonMessage, JobEvent, Kind, Launch, Was, receive, send,
+};
+use crate::scheduler::{Job, lock};
 use crate::store::{self, Finished};
 use std::io::BufReader;
 use std::os::fd::AsRawFd;
@@ -17,6 +19,7 @@ use std::os::unix::net::UnixStream;
 use std::process;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 /// How often a waiting connection checks that its client is still there.
@@ -35,6 +38,36 @@ pub(super) struct Submitted<'a> {
     pub mem_mib: Option<u64>,
     pub class: Class,
     pub submitter: &'a str,
+}
+
+/// A held job's connection as `cancel` reaches it: a writer of its own, whether the client has been
+/// sent `start`, and the cancel, once there is one (where the job was, and the grace period).
+pub(super) struct Link {
+    writer: UnixStream,
+    started: bool,
+    pub(super) cancel: Option<(Was, u64)>,
+}
+
+impl Link {
+    /// Tells the client to stop its command, once it has been sent `start`; until then `start`'s
+    /// sender does it right after (`cancel` is set by then).
+    pub(super) fn tell_cancel(&mut self, job: u64, grace_s: u64) {
+        if self.started {
+            let _ = send(&mut self.writer, &DaemonMessage::Cancel { job, grace_s });
+        }
+    }
+}
+
+/// Takes job `id`'s link out of the registry on every way out of `serve_job`.
+struct Linked<'a> {
+    daemon: &'a Daemon,
+    id: u64,
+}
+
+impl Drop for Linked<'_> {
+    fn drop(&mut self) {
+        lock(&self.daemon.links).remove(&self.id);
+    }
 }
 
 impl Daemon {
@@ -95,6 +128,18 @@ impl Daemon {
             submitter: submitter.to_owned(),
             log: log.clone(),
         };
+        let Ok(link_writer) = writer.try_clone() else {
+            eprintln!("taskslash: job {id} refused: cannot clone its connection");
+            self.never_started(id, &key);
+            return;
+        };
+        let link = Arc::new(Mutex::new(Link {
+            writer: link_writer,
+            started: false,
+            cancel: None,
+        }));
+        lock(&self.links).insert(id, Arc::clone(&link));
+        let _linked = Linked { daemon: self, id };
         let (start, started) = mpsc::channel();
         let (waiting, never_seen) = {
             let mut scheduler = self.scheduler();
@@ -125,7 +170,17 @@ impl Daemon {
             );
             let mut told = Instant::now();
             loop {
-                match started.recv_timeout(WAIT_POLL) {
+                let got = started.recv_timeout(WAIT_POLL);
+                // Cancelled while waiting: `cancel` took it off the queue, so it cannot have been
+                // admitted (and `got` is not `Ok`).
+                if got.is_err()
+                    && let Some((Was::Waiting, grace_s)) = lock(&link).cancel
+                {
+                    let _ = send(writer, &DaemonMessage::Cancel { job: id, grace_s });
+                    self.never_started(id, &key);
+                    return;
+                }
+                match got {
                     Ok(sent) => {
                         admitted = Some(sent);
                         break;
@@ -197,18 +252,27 @@ impl Daemon {
             launch: self.launch,
             log: log.clone(),
         };
-        let (exit_code, cached, moon_hash) = match send(writer, &start)
-            .ok()
-            .and_then(|()| receive(reader).ok().flatten())
-        {
-            Some(ClientMessage::Exited {
-                job,
-                code,
-                cached,
-                moon_hash,
-            }) if job == id => (Some(code), cached, moon_hash),
-            _ => (None, None, None),
+        // Sent under the link's lock, so a `cancel` that came first follows it and one that comes
+        // after finds `started` set.
+        let sent = {
+            let mut link = lock(&link);
+            let sent = send(writer, &start);
+            link.started = true;
+            if let Some((_, grace_s)) = link.cancel {
+                link.tell_cancel(id, grace_s);
+            }
+            sent
         };
+        let (exit_code, cached, moon_hash) =
+            match sent.ok().and_then(|()| receive(reader).ok().flatten()) {
+                Some(ClientMessage::Exited {
+                    job,
+                    code,
+                    cached,
+                    moon_hash,
+                }) if job == id => (Some(code), cached, moon_hash),
+                _ => (None, None, None),
+            };
         // Remembered as ending while the scheduler is still locked, so `logs <n>` always finds it.
         let finished = {
             let mut scheduler = self.scheduler();

@@ -25,6 +25,8 @@ taskslash moon :typecheck :test          # moon targets, one job per target
 taskslash why                             # why each waiting job waits, one line each
 taskslash why 7                           # why job 7 waits ("running", or what became of it)
 taskslash why 7 --json                    # the reason as an object
+taskslash cancel 7                        # take job 7 off the queue, or stop it (SIGTERM, SIGKILL 10s on)
+taskslash cancel 7 --grace 0              # stop it with SIGKILL straight away
 taskslash history                         # every key with runs, the most recently run first
 taskslash history gate                    # the estimate of "gate", then what its last 20 runs cost
 taskslash history "bun test"              # a run with no --name is keyed by its first two words
@@ -47,7 +49,8 @@ taskslash plugins                         # the plugins on PATH (below)
 `taskslash run` runs the command itself, in your directory, with your environment and terminal, and
 exits with its exit code (128+N when signal N killed it, 127 when it cannot be started). With no
 daemon running it does not run the command and exits 1; so do `taskslash history`,
-`taskslash status`, `taskslash why`, `taskslash logs`, `taskslash events` and `taskslash top`.
+`taskslash status`, `taskslash why`, `taskslash cancel`, `taskslash logs`, `taskslash events` and
+`taskslash top`.
 
 ### Every job's output is kept
 
@@ -313,6 +316,19 @@ reason: `{"kind":"resource","resource":"cpu","needs":4.8,"free":1.8,"held_by":[{
 `{"kind":"running"}`, or for an ended job `{"kind":"ended","ended":{"as":"run","run":3140,"key":
 "...","exit_code":0}}` (`as` is also `never_ran`, `unrecorded` or `recording`). A `taskslash run` stopped
 while it waits leaves the queue and its command never runs.
+
+**Cancel a job from any terminal.** `taskslash cancel <job>` takes the number `status`, `why` and the
+waiting line show. A waiting job leaves the queue: its `taskslash run` prints `taskslash: job 12
+cancelled while waiting` and exits 1 without running the command. A running job is stopped by its
+own `taskslash run`, which prints `taskslash: job 12 cancelled` and sends the command's process
+group SIGTERM, then SIGKILL after `--grace` seconds (10 by default, 0 for SIGKILL straight away) if
+it is still running; the run is recorded with the code it ends with (143 after SIGTERM, 137 after
+SIGKILL), and `run` exits with that code. `cancel` prints `job 12 cancelled (was waiting)` or `job
+12 cancelled (was running; SIGTERM sent, SIGKILL in 10s if it has not ended)` and exits 0; a second
+cancel of the same job exits 0 and says it is already being cancelled. A job that is neither
+waiting nor running exits 1, saying how it ended when the daemon remembers. There is no other
+access check than the socket's: it sits in `$XDG_RUNTIME_DIR` in a directory only you can open, so
+only you can cancel your jobs (a `TASKSLASH_SOCKET` elsewhere is as private as its directory).
 
 **A fake machine, for tests.** With `TASKSLASH_FAKE_MACHINE=<file>` in its environment the daemon
 reads the machine from that file (a `machine` object as `status --json` prints it) on every sample

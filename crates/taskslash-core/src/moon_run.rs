@@ -2,7 +2,7 @@
 //! daemon decides how many run at once instead of moon's `--concurrency`.
 
 use crate::Error;
-use crate::capture::pump;
+use crate::capture::{Stop, pump};
 use crate::client::{Demand, Job, Report, run_job};
 use crate::moon::{self, Node};
 use crate::protocol::Class;
@@ -14,7 +14,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -221,12 +221,12 @@ fn run_node(
         label: Some(&node.target),
     };
     let mut wall = Duration::ZERO;
-    let result = run_job(socket, &job, |mut command, log| {
+    let result = run_job(socket, &job, |mut command, log, stop| {
         if let Some(path) = gate_path(root, env::var_os("PATH")) {
             command.env("PATH", path);
         }
         let clock = Instant::now();
-        let ran = exec(command, &node.target, log);
+        let ran = exec(command, &node.target, log, stop);
         wall = clock.elapsed();
         let (status, cached) = ran?;
         let report = Report {
@@ -260,11 +260,14 @@ fn exec(
     mut command: Command,
     target: &str,
     mut log: Option<File>,
+    stop: &Arc<Stop>,
 ) -> io::Result<(ExitStatus, bool)> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    // moon shares this process's group, so a cancel signals moon itself, which stops its task.
+    stop.started(libc::pid_t::try_from(child.id()).unwrap_or(0), false);
     let mut sources = Vec::new();
     // Whether each source is stdout (else stderr).
     let mut is_stdout = Vec::new();
@@ -311,6 +314,7 @@ fn exec(
             cached
         });
         let status = child.wait();
+        stop.ended();
         done.store(true, Ordering::Release);
         let cached = pumping.join().unwrap_or(false);
         Ok((status?, cached))

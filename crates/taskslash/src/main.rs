@@ -4,7 +4,8 @@
 //! its command's code instead. `taskslash history`, `taskslash status` and `taskslash events` exit 1
 //! when no daemon is running, as `run` does; `events` exits 0 when the daemon hangs up. `taskslash
 //! top` exits 1 when no daemon is running and 2 when stdout is not a terminal.
-//! `taskslash moon` exits 1 when any target did not pass. `taskslash logs` exits 1 when the log it
+//! `taskslash moon` exits 1 when any target did not pass. `taskslash cancel` exits 1 when the job is
+//! neither waiting nor running. `taskslash logs` exits 1 when the log it
 //! names is not there. `taskslash <name>`, for a name that is not a
 //! built-in, runs the plugin `taskslash-<name>` from `PATH` in place of taskslash, so the exit code
 //! is the plugin's; exit 2 when there is none.
@@ -19,7 +20,7 @@ use taskslash_core::admission::{Waiting, waiting_line};
 use taskslash_core::plugin;
 use taskslash_core::protocol::{Class, Kind, LogSelect};
 use taskslash_core::{Error, HISTORY_LIMIT};
-use text::{estimate_text, keys_text, status_text, table, waiting_text};
+use text::{cancel_text, estimate_text, keys_text, status_text, table, waiting_text};
 
 mod text;
 mod top;
@@ -174,6 +175,25 @@ enum Commands {
         /// for an ended one); with no job, an array of `{"job","key","submitter","reason"}`.
         #[arg(long)]
         json: bool,
+    },
+    /// Cancel a waiting or running job, from any terminal.
+    ///
+    /// A waiting job leaves the queue: its `taskslash run` prints `taskslash: job <n> cancelled
+    /// while waiting` and exits 1 without running its command. A running job is stopped by its own
+    /// `taskslash run`, which sends the command's process group SIGTERM, then SIGKILL after
+    /// `--grace` seconds if it has not ended; the run is recorded with the code it ends with (143
+    /// after SIGTERM, 137 after SIGKILL). Exits 0 once the job is cancelled, or when it already
+    /// was; 1 when it is neither waiting nor running.
+    ///
+    /// Only the user who runs the daemon can cancel: its socket sits in a directory only that user
+    /// can open (mode 0700, in `$XDG_RUNTIME_DIR`), and that is the only check. A
+    /// `TASKSLASH_SOCKET` elsewhere is as private as its directory.
+    Cancel {
+        /// The job's number, as `status`, `why` and a waiting `run` show it.
+        job: u64,
+        /// Seconds between SIGTERM and SIGKILL; 0 sends SIGKILL straight away.
+        #[arg(long, value_name = "SECONDS", default_value_t = 10)]
+        grace: u64,
     },
     /// Follow the daemon's job events: one line of JSON on stdout per event, as it happens.
     ///
@@ -479,6 +499,17 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
                 &mut io::stderr().lock(),
             )
             .map(|()| 0)
+        }
+        Commands::Cancel { job, grace } => {
+            let cancelled = taskslash_core::cancel(&socket()?, job, grace)?;
+            match cancel_text(&cancelled, job, grace) {
+                Ok(text) => {
+                    write!(io::stdout(), "{text}")
+                        .map_err(|e| Error::new(format!("cannot write the answer: {e}")))?;
+                    Ok(0)
+                }
+                Err(message) => Err(Error::new(message)),
+            }
         }
         Commands::Why { job, json } => {
             let socket = socket()?;

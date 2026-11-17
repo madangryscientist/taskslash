@@ -182,6 +182,15 @@ fn held_signals() -> libc::sigset_t {
     }
 }
 
+/// Blocks the signals the client keeps for itself in the calling thread, so one sent to the client
+/// never lands on a thread of its own that does not forward it (it would take the default action).
+/// A thread started before `run` calls this first.
+pub(crate) fn hold_signals() {
+    let held = held_signals();
+    // SAFETY: `held` is an initialised set; the old mask is not wanted.
+    unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &raw const held, std::ptr::null_mut()) };
+}
+
 /// Forwards the signals the client receives to the command's process group, once there is one
 /// (a signal that comes first waits for it), and the caller's window size to the pseudo-terminal.
 struct Forwarder {
@@ -194,9 +203,8 @@ impl Forwarder {
     /// Blocks the held signals in this thread (every thread it starts after inherits that) and
     /// starts the thread that waits for them. It lives until the process exits.
     fn start(master: Option<OwnedFd>) -> Arc<Self> {
+        hold_signals();
         let held = held_signals();
-        // SAFETY: `held` is an initialised set; the old mask is not wanted.
-        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &raw const held, std::ptr::null_mut()) };
         let forwarder = Arc::new(Self {
             state: Mutex::new((None, Vec::new())),
             master,
@@ -250,6 +258,90 @@ impl Forwarder {
             // SAFETY: `size` is a valid winsize; the kernel tells the command with SIGWINCH.
             unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &raw const size) };
         }
+    }
+}
+
+/// How a job's command is stopped when the daemon cancels it: SIGTERM to its process group, then
+/// SIGKILL after a grace period if it has not ended. The client's reader of the job connection
+/// calls [`Stop::stop`]; whoever runs the command calls [`Stop::started`] and [`Stop::ended`]. A
+/// stop that comes before the command starts waits for it.
+#[derive(Default)]
+pub(crate) struct Stop {
+    state: Mutex<StopState>,
+}
+
+#[derive(Default)]
+struct StopState {
+    /// The process to signal, and whether it leads a process group of its own (signal the group).
+    target: Option<(libc::pid_t, bool)>,
+    /// A stop asked for before the command started: its grace period.
+    pending: Option<Duration>,
+    ended: bool,
+}
+
+impl StopState {
+    fn signal(&self, signal: libc::c_int) {
+        if self.ended {
+            return;
+        }
+        if let Some((pid, group)) = self.target {
+            // SAFETY: kill signals that process, or with a negative pid its group; a gone one is
+            // ESRCH.
+            unsafe { libc::kill(if group { -pid } else { pid }, signal) };
+        }
+    }
+}
+
+impl Stop {
+    /// Stops the command: SIGTERM now and SIGKILL after `grace` if it is still running, or SIGKILL
+    /// straight away when `grace` is zero.
+    pub(crate) fn stop(self: &Arc<Self>, grace: Duration) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.target.is_none() {
+            state.pending = Some(grace);
+            return;
+        }
+        drop(state);
+        self.term_then_kill(grace);
+    }
+
+    fn term_then_kill(self: &Arc<Self>, grace: Duration) {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if grace.is_zero() {
+            state.signal(libc::SIGKILL);
+            return;
+        }
+        state.signal(libc::SIGTERM);
+        drop(state);
+        let stop = Arc::clone(self);
+        thread::spawn(move || {
+            thread::sleep(grace);
+            stop.state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .signal(libc::SIGKILL);
+        });
+    }
+
+    /// The command started as process `pid`, leading a process group of its own when `group`. A
+    /// stop asked for earlier is sent now.
+    pub(crate) fn started(self: &Arc<Self>, pid: libc::pid_t, group: bool) {
+        let pending = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.target = Some((pid, group));
+            state.pending.take()
+        };
+        if let Some(grace) = pending {
+            self.term_then_kill(grace);
+        }
+    }
+
+    /// The command has ended: nothing is signalled after this.
+    pub(crate) fn ended(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .ended = true;
     }
 }
 
@@ -334,9 +426,13 @@ impl Drop for Caller {
 }
 
 /// Runs `command` to its end with its output copied to the caller and into `log`, forwarding
-/// signals to it and restoring the caller's terminal after. Returns how it ended; an `Err` means it
-/// never started.
-pub(crate) fn run(mut command: Command, mut log: Option<File>) -> io::Result<ExitStatus> {
+/// signals to it and restoring the caller's terminal after; `stop` cancels it. Returns how it ended;
+/// an `Err` means it never started.
+pub(crate) fn run(
+    mut command: Command,
+    mut log: Option<File>,
+    stop: &Arc<Stop>,
+) -> io::Result<ExitStatus> {
     let pty = is_tty(libc::STDOUT_FILENO);
     let stdin_tty = is_tty(libc::STDIN_FILENO);
     let mut caller = Caller {
@@ -396,6 +492,7 @@ pub(crate) fn run(mut command: Command, mut log: Option<File>) -> io::Result<Exi
     drop(command);
     let pid = libc::pid_t::try_from(child.id()).unwrap_or(0);
     forwarder.started(pid);
+    stop.started(pid, true);
     caller.group = Some(pid);
     caller.take();
 
@@ -429,6 +526,7 @@ pub(crate) fn run(mut command: Command, mut log: Option<File>) -> io::Result<Exi
             });
         });
         let status = wait(pid, &caller);
+        stop.ended();
         done.store(true, Ordering::Release);
         status
     });

@@ -12,6 +12,12 @@
 //! runs or is not held, and why it waits). Or `log`; the daemon answers `log` (the job or run it
 //! picked and where its log is).
 //!
+//! A cancel: the client sends `cancel`; the daemon answers `cancelled` (the job was waiting or
+//! running, or is already being cancelled) or `not_cancelled` (it holds no such job), and closes.
+//! A waiting job's client is sent `cancel` and the job leaves the queue; a running job's client
+//! is sent `cancel` on the job's connection and stops its command itself: SIGTERM, then SIGKILL
+//! after `grace_s` if it has not ended.
+//!
 //! A subscriber: the client sends `subscribe`; the daemon answers `subscribed`, then sends one
 //! `event` per job event (queued, started, finished) until the client hangs up. It never replays
 //! an event from before `subscribed`, and never waits for a slow subscriber: what does not fit in
@@ -147,6 +153,26 @@ pub enum ClientMessage {
     /// Follow the daemon's job events: `subscribed`, then one `event` per job event from then on,
     /// until the client hangs up.
     Subscribe,
+    /// Cancel job `job`: take it off the queue when it waits; when it runs, have its client send
+    /// its command SIGTERM, then SIGKILL after `grace_s` (0: SIGKILL straight away).
+    Cancel { job: u64, grace_s: u64 },
+}
+
+/// Where a job was when it was cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Was {
+    Waiting,
+    Running,
+}
+
+impl Was {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Running => "running",
+        }
+    }
 }
 
 /// Which log `taskslash logs` asks for.
@@ -273,6 +299,25 @@ pub enum DaemonMessage {
         protocol: u32,
         seq: u64,
         event: JobEvent,
+    },
+    /// Sent on a job's connection: the job is cancelled. A waiting job has left the queue, so its
+    /// client exits without running it; a running job's client sends its command SIGTERM, then
+    /// SIGKILL after `grace_s` if it has not ended (0: SIGKILL straight away).
+    Cancel { job: u64, grace_s: u64 },
+    /// The answer to `cancel`: job `job` was waiting or running and is cancelled; `already` when an
+    /// earlier `cancel` got there first.
+    Cancelled {
+        job: u64,
+        was: Was,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        already: bool,
+    },
+    /// The answer to `cancel` when job `job` is neither waiting nor running; `ended` says what
+    /// became of it when the daemon remembers it ending.
+    NotCancelled {
+        job: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ended: Option<JobEnded>,
     },
     /// The request was refused; the daemon closes the connection after this.
     Error { message: String },

@@ -44,7 +44,7 @@ Fix size: **S** is under an hour, **M** about a day, **L** more than a day.
 | 15 | `taskslash why` | Usage error, exit 2: it needs a job number. `taskslash why 1` for a job that ended says `job 1 not found (an ended job's record is in history)`, but `history` needs a key, not a job number, and job numbers start again at 1 when the daemon restarts. | To ask "why is anything waiting" without first finding a number. | `why` with no job explains every waiting job, one line each, or says nothing waits. For an ended job, name its key and run id if the daemon still remembers it. | S |
 | 16 | `taskslash logs --failed` | Printed a TypeScript error log with no header, exit 0. It was the newest failure **on the whole machine**, from another worktree, and nothing said which key, run, worktree or time it was. | To know whose failure it is, and by default to see the ones from here. | A header on stderr (`run 3140 <key> in <worktree>, exit 2, 20:22`), and a `--here` (or default) scope of the current worktree. | S |
 | 17 | `taskslash logs 1` | `taskslash: no job 1`, exit 1. The job had ended; the log exists. | The next step. | `no running job 1; an ended job's log is under taskslash logs --run <id> (see taskslash history <key>)`, or look the job up by number while the daemon remembers it. | S |
-| 18 | (no command) cancel | There is no way to take a waiting job out of the queue or stop a running one, except Ctrl-C in the terminal that submitted it. A job submitted by a script or another terminal cannot be stopped from here. | To cancel a stuck or unwanted job. | `taskslash cancel <job>`: a waiting job leaves the queue, a running one gets SIGTERM, then SIGKILL after a grace period. Only the submitting user. | M |
+| 18 | (no command) cancel | There is no way to take a waiting job out of the queue or stop a running one, except Ctrl-C in the terminal that submitted it. A job submitted by a script or another terminal cannot be stopped from here. | To cancel a stuck or unwanted job. | Done: `taskslash cancel <job>`: a waiting job leaves the queue (its `run` exits 1), a running one gets SIGTERM, then SIGKILL after `--grace` seconds (10 by default), and its run is recorded with the code it ended with. Only the submitting user, through the socket's permissions. | M |
 | 19 | `taskslash top` | On an idle machine it opens on `no jobs since top opened` and `no job selected`: finished jobs from before it opened are never shown. Keys are only q, j/k and arrows: no full log, no cancel, no help key. | Something useful on first open: the last few finished runs. | Seed the finished list from the newest runs in the database. Later: `enter` opens the full log in a pager, `?` lists keys, `c` cancels once row 18 exists. | M |
 | 20 | `taskslash events` | Prints nothing until a job event happens. A person cannot tell it is connected and waiting. The help is written for plugin authors (the JSON shape), which is right for its purpose. | A sign of life. | When stderr is a terminal, one line there: `listening for job events (Ctrl-C to stop)`. | S |
 | 21 | `taskslash plugins` | Prints nothing, exit 0, when no plugin is installed. | To know the list is empty, and what a plugin is. | `no plugins on PATH (a plugin is an executable named taskslash-<name>)`. | S |
@@ -72,8 +72,8 @@ The no-daemon message is clear and says what to do, for every command.
 4. **Rows 13, 14 and 15: job numbers and worktrees where a person looks.** `run` prints its job
    number while waiting, `status` says when nothing runs and shows each job's worktree and age, and
    `why` with no argument explains every waiting job.
-5. **Row 18: `taskslash cancel <job>`.** The only missing action rather than missing text: a job
-   submitted elsewhere cannot be stopped today. It is M because it touches the daemon and needs
-   its own tests.
+5. **Row 18: `taskslash cancel <job>`.** Shipped. The only missing action rather than missing
+   text: a job submitted elsewhere could not be stopped. It was M because it touches the daemon and
+   needs its own tests.
 
 Rows 5 (clone names), 19 (`top` opening empty) and 23 (version and commit) are next in line.
