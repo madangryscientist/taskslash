@@ -3,12 +3,12 @@
 Checked against main at ccdb25a on 2026-11-17.
 
 ## What it is
-TaskSlash stops builds and tests that start at the same time from overloading one computer: each one waits in a queue until the machine has room for it. It is early (alpha), version 0.1.0.
+TaskSlash stops builds and tests that start at the same time from overloading one computer: each one waits in a queue until your computer has capacity for it. It is early (alpha), version 0.1.0.
 
 ## Today
 - `daemon-queue`: A daemon, `taskslash daemon`, holds the queue and decides when each submitted job starts.
 - `run-command`: `taskslash run -- <command>` runs a command as a job, in your directory with your environment and terminal, and exits with the command's own exit code.
-- `admission-by-room`: A job starts when its estimated CPU, memory and disk writes fit in what the machine has left, and waits while the machine's CPU, memory or I/O pressure is over a set line. A job too big to ever fit starts when nothing else runs, and a job held only by load TaskSlash does not run starts after a set wait.
+- `admission-by-capacity`: A job starts when its estimated CPU, memory and disk writes fit in the CPU, memory and disk writes the computer has free, and waits while the machine's CPU, memory or I/O pressure is over a set line. A job too big to ever fit starts when nothing else runs, and a job held only by load TaskSlash does not run starts after a set wait.
 - `learned-estimates`: The daemon estimates what a job will cost from the recorded runs of the same name, and falls back to a default for its kind (test, typecheck, build, browser, command) until there is history.
 - `measured-runs`: With a systemd user session, each job runs in its own systemd scope and the daemon records its wall time, CPU, peak memory, disk writes and exit code in a SQLite database.
 - `priority-classes`: A job has a priority class (urgent, flake, interactive, normal, background), and within a class the worktree using the least of the machine goes first.
