@@ -95,29 +95,27 @@ fn capped(names: &[&str]) -> String {
 }
 
 /// What exists, for a target `<project>:<task>` (`project` empty for `:<task>`) that matches
-/// nothing: the projects that have `task`, else the tasks `project` has, else every task name.
-fn no_match_hint(tasks: &[Task], project: &str, task: &str) -> String {
-    let with_task: BTreeSet<&str> = tasks
-        .iter()
-        .filter(|t| t.task == task)
-        .map(|t| t.project.as_str())
-        .collect();
+/// nothing: the projects that have `task`, else the tasks `project` has, else (an unknown
+/// project) the projects, else (`:<task>`) every task name. `None` for a workspace with no tasks.
+fn no_match_hint(tasks: &[Task], project: &str, task: &str) -> Option<String> {
+    let names = |pick: &dyn Fn(&Task) -> Option<&str>| -> Vec<&str> {
+        let set: BTreeSet<&str> = tasks.iter().filter_map(pick).collect();
+        set.into_iter().collect()
+    };
+    let with_task = names(&|t| (t.task == task).then_some(t.project.as_str()));
     if !with_task.is_empty() {
-        let names: Vec<&str> = with_task.into_iter().collect();
-        return format!("projects with {task}: {}", capped(&names));
+        return Some(format!("projects with {task}: {}", capped(&with_task)));
     }
-    let of_project: BTreeSet<&str> = tasks
-        .iter()
-        .filter(|t| t.project == project)
-        .map(|t| t.task.as_str())
-        .collect();
+    let of_project = names(&|t| (t.project == project).then_some(t.task.as_str()));
     if !of_project.is_empty() {
-        let names: Vec<&str> = of_project.into_iter().collect();
-        return format!("tasks in {project}: {}", capped(&names));
+        return Some(format!("tasks in {project}: {}", capped(&of_project)));
     }
-    let all: BTreeSet<&str> = tasks.iter().map(|t| t.task.as_str()).collect();
-    let names: Vec<&str> = all.into_iter().collect();
-    format!("tasks: {}", capped(&names))
+    if project.is_empty() {
+        let all = names(&|t| Some(t.task.as_str()));
+        return (!all.is_empty()).then(|| format!("tasks: {}", capped(&all)));
+    }
+    let all = names(&|t| Some(t.project.as_str()));
+    (!all.is_empty()).then(|| format!("no project {project}; projects: {}", capped(&all)))
 }
 
 /// The cost class of a moon task, by its name.
@@ -208,10 +206,10 @@ pub fn graph(tasks: &[Task], requested: &[String]) -> Result<Vec<Node>, Error> {
             wanted.insert(t.target.as_str());
         }
         if !matched {
-            return Err(Error::usage(format!(
-                "{target} matches no task\n  {}",
-                no_match_hint(tasks, project, task)
-            )));
+            let hint = no_match_hint(tasks, project, task)
+                .map(|hint| format!("\n  {hint}"))
+                .unwrap_or_default();
+            return Err(Error::usage(format!("{target} matches no task{hint}")));
         }
     }
 

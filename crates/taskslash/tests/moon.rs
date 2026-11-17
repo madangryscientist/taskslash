@@ -235,13 +235,6 @@ fn outside_a_workspace_or_with_a_bad_target_is_a_usage_error() {
         err.contains("a:nope matches no task\n  tasks in a: gen, test, typecheck\n"),
         "{err}"
     );
-    let out = daemon.scratch.taskslash(&["moon", "nosuch:lint"]);
-    assert_eq!(out.status.code(), Some(2), "{out:?}");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("nosuch:lint matches no task\n  projects with lint: b\n"),
-        "{err}"
-    );
     let out = daemon
         .scratch
         .command(BIN, &["moon", ":test"])

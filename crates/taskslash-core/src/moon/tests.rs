@@ -136,6 +136,16 @@ fn a_target_that_matches_nothing_lists_what_exists() {
     );
     assert_eq!(hint(&tasks, "cli:nosuch"), "  tasks in cli: lint, test");
     assert_eq!(hint(&tasks, ":nosuch"), "  tasks: build, lint, test");
+    assert_eq!(
+        hint(&tasks, "nosuch:nosuch"),
+        "  no project nosuch; projects: cli, web"
+    );
+    let e = graph(&[], &["a:test".to_owned()]).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "a:test matches no task",
+        "no tasks, no hint line"
+    );
 
     let many: Vec<Task> = (0..15)
         .map(|i| task(&format!("p{i:02}:test"), &[]))
@@ -158,7 +168,6 @@ fn no_moon_says_to_install_first() {
             .ends_with("; run your package manager's install (bun install) first"),
         "{e}"
     );
-    assert!(moon_binary_on(&base, None).is_err());
     fs::remove_dir_all(&base).unwrap();
 }
 

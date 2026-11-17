@@ -72,10 +72,6 @@ fn a_summary_line_says_how_long_whether_cached_and_its_key() {
         "b:lint skipped - [shop/b:lint]\n",
         "a skipped target never ran, so it has no log"
     );
-}
-
-#[test]
-fn a_failed_target_is_followed_by_its_log_command() {
     assert_eq!(
         summary_line("b:typecheck", "shop/b:typecheck", &end(State::Fail)),
         "b:typecheck fail 1.2s [shop/b:typecheck]\n  log: taskslash logs --last shop/b:typecheck\n"
