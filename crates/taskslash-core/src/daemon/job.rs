@@ -142,7 +142,16 @@ impl Daemon {
                     }
                     Err(RecvTimeoutError::Timeout) if hung_up(writer) => {
                         // Not on the queue any more means it started meanwhile: run it as dropped.
-                        if self.scheduler().leave(id) {
+                        // Remembered while the scheduler is locked, as `finish` below does.
+                        let left = {
+                            let mut scheduler = self.scheduler();
+                            let left = scheduler.leave(id);
+                            if left {
+                                self.job_ended(id, Ended::NoRun);
+                            }
+                            left
+                        };
+                        if left {
                             eprintln!("job {id} left the queue");
                             self.never_started(id, &key);
                             return;
