@@ -34,8 +34,8 @@ mod socket;
 mod store;
 
 pub use client::{
-    Demand, Subscription, Whereabouts, events, history, keys, logs, run, status, submitter,
-    subscribe, why,
+    Cancelled, Demand, Subscription, Whereabouts, cancel, events, history, keys, logs, run, status,
+    submitter, subscribe, why,
 };
 pub use daemon::serve;
 pub use moon::target_key;

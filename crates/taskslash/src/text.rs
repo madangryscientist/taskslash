@@ -35,10 +35,11 @@ pub fn keys_text(keys: &[KeySummary]) -> String {
 }
 
 use std::time::{SystemTime, UNIX_EPOCH};
+use taskslash_core::Cancelled;
 use taskslash_core::admission::ordinal;
 use taskslash_core::estimate::{Estimate, Source};
 use taskslash_core::procfs::epoch_secs;
-use taskslash_core::protocol::{KeySummary, Run, Status, WaitingStatus, worktree};
+use taskslash_core::protocol::{KeySummary, Run, Status, WaitingStatus, Was, worktree};
 
 /// How long, read at a glance: `45s`, `1m05s` past a minute, `2h03m` past an hour.
 pub fn duration(seconds: f64) -> String {
@@ -218,12 +219,40 @@ pub fn table(runs: &[Run]) -> String {
     out
 }
 
+/// What `taskslash cancel <job>` prints on stdout (`Ok`), or its error message (`Err`, exit 1).
+pub fn cancel_text(cancelled: &Cancelled, job: u64, grace_s: u64) -> Result<String, String> {
+    match cancelled {
+        Cancelled::Now { was, already: true } => Ok(format!(
+            "job {job} is already being cancelled (it was {})\n",
+            was.as_str()
+        )),
+        Cancelled::Now {
+            was: Was::Waiting, ..
+        } => Ok(format!("job {job} cancelled (was waiting)\n")),
+        Cancelled::Now { .. } if grace_s == 0 => {
+            Ok(format!("job {job} cancelled (was running; SIGKILL sent)\n"))
+        }
+        Cancelled::Now { .. } => Ok(format!(
+            "job {job} cancelled (was running; SIGTERM sent, SIGKILL in {grace_s}s if it has not ended)\n"
+        )),
+        Cancelled::NotHeld(ended) => {
+            let how = ended
+                .as_ref()
+                .map(|ended| format!("\n  {}", ended.sentence(job)))
+                .unwrap_or_default();
+            Err(format!(
+                "job {job} is not waiting or running{how}\n  (taskslash status lists jobs)"
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
     use taskslash_core::estimate::estimate;
-    use taskslash_core::protocol::{Class, JobStatus, Kind, Launch};
+    use taskslash_core::protocol::{Class, JobEnded, JobStatus, Kind, Launch};
     use taskslash_core::sampler::MachineSnapshot;
 
     fn machine() -> MachineSnapshot {
@@ -424,6 +453,24 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("no jobs running"), "{text}");
+    }
+
+    #[test]
+    fn cancel_says_where_the_job_was_and_what_was_sent() {
+        let now = |was, already| Cancelled::Now { was, already };
+        assert_eq!(
+            cancel_text(&now(Was::Running, false), 12, 0).unwrap(),
+            "job 12 cancelled (was running; SIGKILL sent)\n"
+        );
+        assert_eq!(
+            cancel_text(&now(Was::Running, true), 12, 10).unwrap(),
+            "job 12 is already being cancelled (it was running)\n"
+        );
+        assert_eq!(
+            cancel_text(&Cancelled::NotHeld(Some(JobEnded::NeverRan)), 12, 10).unwrap_err(),
+            "job 12 is not waiting or running\n  job 12 ended without running (it left the queue, \
+             or its client went before it started)\n  (taskslash status lists jobs)"
+        );
     }
 
     #[test]

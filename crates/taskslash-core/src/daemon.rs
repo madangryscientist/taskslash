@@ -10,7 +10,7 @@ use crate::logs::{self, Retention};
 use crate::procfs;
 use crate::protocol::{
     ClientMessage, DaemonMessage, JobEnded, JobState, Kind, Launch, LogFound, LogSelect, Run,
-    Status, receive, send,
+    Status, Was, receive, send,
 };
 use crate::sampler::{FileSampler, MachineSampler, MachineSnapshot, ProcSampler};
 use crate::scheduler::{Scheduler, lock};
@@ -51,6 +51,8 @@ struct Daemon {
     events: events::Bus,
     /// The newest jobs that ended since it started, and their runs. Locked on its own.
     ended: Mutex<EndedJobs>,
+    /// Each held job's connection, so `cancel` can reach its client. Locked after `scheduler`.
+    links: Mutex<HashMap<u64, Arc<Mutex<job::Link>>>>,
 }
 
 /// Binds the socket at `path`, opens the database at `db`, and serves until the process is killed.
@@ -86,6 +88,7 @@ pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
         machine: Mutex::new(first),
         events: events::Bus::default(),
         ended: Mutex::new(EndedJobs::new(ENDED_JOBS)),
+        links: Mutex::new(HashMap::new()),
     });
     let sampling = Arc::clone(&daemon);
     thread::spawn(move || sampling.sample_forever(machine));
@@ -236,10 +239,13 @@ impl Daemon {
                 let _ = send(&mut writer, &reply);
             }
             Ok(Some(ClientMessage::Subscribe)) => self.serve_subscriber(&mut writer),
+            Ok(Some(ClientMessage::Cancel { job, grace_s })) => {
+                let _ = send(&mut writer, &self.cancel(job, grace_s));
+            }
             Ok(Some(ClientMessage::Exited { .. })) => {
                 refuse(
                     &mut writer,
-                    "expected submit, history, keys, status, why, log or subscribe, got exited",
+                    "expected submit, history, keys, status, why, log, cancel or subscribe, got exited",
                 );
             }
             Err(e) => refuse(&mut writer, &format!("bad request: {e}")),
@@ -391,6 +397,58 @@ impl Daemon {
             position,
             ended,
         }
+    }
+
+    /// Cancels job `job`, under the scheduler lock so it cannot start or end meanwhile. A waiting
+    /// job leaves the queue here (its connection's thread tells its client); a running one's client
+    /// is sent `cancel` on its connection, at once when it has been sent `start`, else right after.
+    fn cancel(&self, job: u64, grace_s: u64) -> DaemonMessage {
+        let mut scheduler = self.scheduler();
+        let link = lock(&self.links).get(&job).cloned();
+        let (state, _) = scheduler.whereabouts(job);
+        if let Some(link) = link {
+            let mut link = lock(&link);
+            if let Some((was, _)) = link.cancel {
+                return DaemonMessage::Cancelled {
+                    job,
+                    was,
+                    already: true,
+                };
+            }
+            let was = match state {
+                JobState::Waiting => {
+                    scheduler.leave(job);
+                    self.job_ended(job, Ended::NoRun);
+                    Some(Was::Waiting)
+                }
+                JobState::Running => {
+                    link.tell_cancel(job, grace_s);
+                    Some(Was::Running)
+                }
+                // Its connection's thread is ending it.
+                JobState::NotFound => None,
+            };
+            if let Some(was) = was {
+                link.cancel = Some((was, grace_s));
+                eprintln!("job {job} cancelled (was {})", was.as_str());
+                return DaemonMessage::Cancelled {
+                    job,
+                    was,
+                    already: false,
+                };
+            }
+        }
+        drop(scheduler);
+        let ended = match self.ended_job(job).map(|ended| self.job_ended_as(ended)) {
+            Some(Ok(ended)) => Some(ended),
+            Some(Err(e)) => {
+                return DaemonMessage::Error {
+                    message: e.to_string(),
+                };
+            }
+            None => None,
+        };
+        DaemonMessage::NotCancelled { job, ended }
     }
 
     /// An ended job as `why` reports it; a run that is not in the store reads as unrecorded.

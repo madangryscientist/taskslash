@@ -225,3 +225,72 @@ fn an_ended_job_reads_as_its_run_or_why_it_has_none() {
         "{\"kind\":\"ended\",\"ended\":{\"as\":\"run\",\"run\":3140,\"key\":\"shop/web:test\",\"exit_code\":0}}\n"
     );
 }
+
+#[test]
+fn cancel_and_its_answers_round_trip_as_tagged_json_lines() {
+    let ask = ClientMessage::Cancel {
+        job: 12,
+        grace_s: 10,
+    };
+    let tell = DaemonMessage::Cancel {
+        job: 12,
+        grace_s: 0,
+    };
+    let waiting = DaemonMessage::Cancelled {
+        job: 12,
+        was: Was::Waiting,
+        already: false,
+    };
+    let again = DaemonMessage::Cancelled {
+        job: 12,
+        was: Was::Running,
+        already: true,
+    };
+    let unknown = DaemonMessage::NotCancelled {
+        job: 12,
+        ended: None,
+    };
+    let ended = DaemonMessage::NotCancelled {
+        job: 12,
+        ended: Some(JobEnded::NeverRan),
+    };
+    let mut wire = Vec::new();
+    send(&mut wire, &ask).unwrap();
+    for message in [&tell, &waiting, &again, &unknown, &ended] {
+        send(&mut wire, message).unwrap();
+    }
+    assert_eq!(
+        String::from_utf8_lossy(&wire),
+        "{\"type\":\"cancel\",\"job\":12,\"grace_s\":10}\n\
+         {\"type\":\"cancel\",\"job\":12,\"grace_s\":0}\n\
+         {\"type\":\"cancelled\",\"job\":12,\"was\":\"waiting\"}\n\
+         {\"type\":\"cancelled\",\"job\":12,\"was\":\"running\",\"already\":true}\n\
+         {\"type\":\"not_cancelled\",\"job\":12}\n\
+         {\"type\":\"not_cancelled\",\"job\":12,\"ended\":{\"as\":\"never_ran\"}}\n"
+    );
+    let mut reader = wire.as_slice();
+    assert_eq!(receive(&mut reader).unwrap(), Some(ask));
+    for message in [tell, waiting, again, unknown, ended] {
+        assert_eq!(
+            receive::<DaemonMessage>(&mut reader).unwrap(),
+            Some(message)
+        );
+    }
+}
+
+#[test]
+fn an_old_shape_start_and_waiting_still_parse() {
+    let start: DaemonMessage = serde_json::from_str(
+        r#"{"type":"start","job":3,"unit":"taskslash-1-3","launch":"plain","log":"/l"}"#,
+    )
+    .unwrap();
+    assert!(matches!(start, DaemonMessage::Start { job: 3, .. }));
+    let waiting: DaemonMessage = serde_json::from_str(
+        r#"{"type":"waiting","job":4,"reason":{"kind":"behind","job":3,"key":"k"},"waited_s":0,"position":1}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        waiting,
+        DaemonMessage::Waiting { job: Some(4), .. }
+    ));
+}

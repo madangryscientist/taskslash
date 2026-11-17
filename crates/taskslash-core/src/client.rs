@@ -7,12 +7,12 @@
 
 use crate::Error;
 use crate::admission::{Reason, Waiting, waiting_line};
-use crate::capture;
+use crate::capture::{self, Stop};
 use crate::estimate::Estimate;
 use crate::launch;
 use crate::protocol::{
     Class, ClientMessage, DaemonMessage, JobEnded, JobEvent, JobState, KeySummary, Kind, Launch,
-    Run, Status, receive, send, submitted_from,
+    Run, Status, Was, receive, send, submitted_from,
 };
 use std::env;
 use std::ffi::OsString;
@@ -22,6 +22,9 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 /// The exit code when the command cannot be started, as a shell uses.
 const CANNOT_RUN: i32 = 127;
@@ -107,8 +110,8 @@ pub fn run(
         cwd: &cwd,
         label: None,
     };
-    run_job(socket, &job, |command, log| {
-        capture::run(command, log).map(|status| (status, Report::default()))
+    run_job(socket, &job, |command, log, stop| {
+        capture::run(command, log, stop).map(|status| (status, Report::default()))
     })
     .map(|(code, _)| code)
 }
@@ -134,12 +137,14 @@ pub(crate) struct Report {
 
 /// Submits `job` on a connection of its own, waits for admission, has `exec` run the prepared
 /// command (in `job.cwd`) to its end with the job's log open for it (`None` when it cannot be
-/// opened), and reports the end to the daemon. Several may run at once, one per thread. Returns the
-/// exit code and `exec`'s report; an `Err` means the command never ran.
+/// opened), and reports the end to the daemon. While the command runs, a thread reads the job's
+/// connection, and a `cancel` from the daemon stops the command through the `Stop` handed to
+/// `exec`. Several may run at once, one per thread. Returns the exit code and `exec`'s report; an
+/// `Err` means the command never ran (it was cancelled while waiting, or the daemon is gone).
 pub(crate) fn run_job(
     socket: &Path,
     job: &Job,
-    exec: impl FnOnce(Command, Option<File>) -> io::Result<(ExitStatus, Report)>,
+    exec: impl FnOnce(Command, Option<File>, &Arc<Stop>) -> io::Result<(ExitStatus, Report)>,
 ) -> Result<(i32, Report), Error> {
     let mut daemon = Connection::open(socket)?;
     let submit = ClientMessage::Submit {
@@ -192,10 +197,22 @@ pub(crate) fn run_job(
                     None => eprintln!("{line}"),
                 }
             }
+            DaemonMessage::Cancel { job: number, .. } => {
+                return Err(Error::new(format!("job {number} cancelled while waiting")));
+            }
             other => return Err(Error::new(format!("unexpected reply {other:?}"))),
         }
         reply = daemon.next()?;
     };
+
+    // From here the daemon speaks only to cancel the job, and to answer `exited`.
+    let stop = Arc::new(Stop::default());
+    let Connection {
+        reader,
+        writer: mut daemon,
+        socket: _,
+    } = daemon;
+    let listening = listen(reader, id, Arc::clone(&stop));
 
     let program = Path::new(&job.argv[0]);
     let mut log = capture::open_log(Path::new(&log));
@@ -214,7 +231,7 @@ pub(crate) fn run_job(
         let mut command = launch::command(launch, &unit, job.class, job.argv);
         command.current_dir(job.cwd);
         let mut copy = log.as_ref().and_then(|log| log.try_clone().ok());
-        match exec(command, log) {
+        match exec(command, log, &stop) {
             Ok((status, report)) => (exit_code(status), report),
             Err(e) => cannot_run(&e, copy.as_mut()),
         }
@@ -227,12 +244,68 @@ pub(crate) fn run_job(
         cached: report.cached,
         moon_hash: report.moon_hash.clone(),
     };
-    match daemon.ask(&exited) {
+    let reply = match send(&mut daemon, &exited) {
+        Ok(()) => listening
+            .join()
+            .unwrap_or_else(|_| Err("its reader panicked".to_owned())),
+        Err(e) => Err(e.to_string()),
+    };
+    match reply {
         Ok(DaemonMessage::Recorded { .. }) => {}
         Ok(_) => eprintln!("taskslash: warning: the daemon did not record job {id}"),
         Err(e) => eprintln!("taskslash: warning: could not report job {id} to the daemon: {e}"),
     }
     Ok((code, report))
+}
+
+/// Reads job `id`'s connection while its command runs: a `cancel` stops the command through
+/// `stop` (and says so on stderr); the thread returns the first other message, the daemon's answer
+/// to `exited`, or why there is none.
+fn listen(
+    mut reader: BufReader<UnixStream>,
+    id: u64,
+    stop: Arc<Stop>,
+) -> thread::JoinHandle<Result<DaemonMessage, String>> {
+    thread::spawn(move || {
+        capture::hold_signals();
+        loop {
+            match receive(&mut reader) {
+                Ok(Some(DaemonMessage::Cancel { grace_s, .. })) => {
+                    eprintln!("taskslash: job {id} cancelled");
+                    stop.stop(Duration::from_secs(grace_s));
+                }
+                Ok(Some(DaemonMessage::Error { message })) => {
+                    return Err(format!("the daemon refused: {message}"));
+                }
+                Ok(Some(reply)) => return Ok(reply),
+                Ok(None) => return Err("the daemon closed the connection".to_owned()),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    })
+}
+
+/// What `taskslash cancel` got.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cancelled {
+    /// The job was waiting or running and is cancelled now, or `already` was.
+    Now { was: Was, already: bool },
+    /// The job is neither waiting nor running; what became of it, when the daemon remembers.
+    NotHeld(Option<JobEnded>),
+}
+
+/// Cancels job `job`: off the queue when it waits; when it runs, its client sends its command
+/// SIGTERM, then SIGKILL after `grace_s` (0: SIGKILL straight away).
+pub fn cancel(socket: &Path, job: u64, grace_s: u64) -> Result<Cancelled, Error> {
+    let mut daemon = Connection::open(socket)?;
+    match daemon
+        .ask(&ClientMessage::Cancel { job, grace_s })
+        .map_err(older_daemon)?
+    {
+        DaemonMessage::Cancelled { was, already, .. } => Ok(Cancelled::Now { was, already }),
+        DaemonMessage::NotCancelled { ended, .. } => Ok(Cancelled::NotHeld(ended)),
+        other => Err(Error::new(format!("unexpected reply {other:?}"))),
+    }
 }
 
 /// The estimate of `key` and its recorded runs, newest first: at most `limit`, and with `within`
