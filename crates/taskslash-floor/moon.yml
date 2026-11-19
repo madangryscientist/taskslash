@@ -1,0 +1,11 @@
+$schema: "../../.moon/cache/schemas/project.json"
+
+tags: ["rust"]
+
+tasks:
+  # Not part of the gate: `bunx moon run floor:bench`. Both binaries are built first, since the
+  # benchmark runs `taskslash-floor` from its own target directory.
+  bench:
+    script: "cargo build --release --locked --bins && cargo run --release --locked --bin floor-bench"
+    options:
+      cache: false

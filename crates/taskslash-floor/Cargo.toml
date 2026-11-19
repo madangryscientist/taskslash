@@ -1,0 +1,8 @@
+[package]
+name = "taskslash-floor"
+description = "A bare pass-through and a start benchmark: the floor TaskSlash's own overhead is read against."
+license = "MIT"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
