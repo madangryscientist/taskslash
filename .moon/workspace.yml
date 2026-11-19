@@ -11,6 +11,7 @@ projects:
   engine: "packages/engine"
   core: "crates/taskslash-core"
   bin: "crates/taskslash"
+  floor: "crates/taskslash-floor"
   scripts: "scripts"
 
 vcs:
