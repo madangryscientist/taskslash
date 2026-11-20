@@ -180,7 +180,7 @@ fn a_job_too_big_to_ever_fit_starts_alone() {
     assert_eq!(decide(&m, &[], &demand(12.0)), Decision::Start);
     let (resource, _, free, _) = resource_of(&decide(&m, &[job(1, 0.5)], &demand(12.0)));
     assert_eq!((resource, free), (Resource::Cpu, 8.0));
-    // Alone but under a gate: it waits like any other.
+    // Alone but under a pressure gate: it waits like any other.
     let mut m = machine();
     m.io.pressure.some_avg10 = 30.0;
     assert_eq!(gate_of(decide(&m, &[], &demand(12.0))), Gate::IoPressure);

@@ -228,7 +228,7 @@ fn pass_on(m: &MachineSnapshot, unmanaged: &Use, waiting: &[Queued], running: &[
     )
 }
 
-/// A machine whose CPU pressure is over the 40% gate.
+/// A machine whose CPU pressure is over the 40% pressure gate.
 fn cpu_pressed() -> MachineSnapshot {
     let mut m = machine();
     m.cpu.pressure.some_avg10 = 52.0;
@@ -325,7 +325,7 @@ fn the_memory_and_mount_gates_are_never_capped() {
     pressed.memory.pressure.some_avg10 = 20.0;
     let mut full = machine();
     full.mounts[0].used = 0.95;
-    // A capped gate holding first must not let a job past a memory gate that also holds.
+    // A capped pressure gate holding first must not let a job past a memory pressure gate that also holds.
     let mut both = cpu_pressed();
     both.memory.available_mib = 1024;
 
