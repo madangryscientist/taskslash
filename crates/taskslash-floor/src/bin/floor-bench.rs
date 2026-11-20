@@ -23,11 +23,12 @@ const USAGE: &str = "usage: floor-bench [--runs N] [--taskslash <path>]";
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     let n = sorted.len();
     // The rank is ceil(p * n / 100), at least 1, multiplied before the divide so a whole-number
-    // rank (95 of 100) stays whole. Sample counts are far below 2^52, so the casts are exact.
+    // rank (95 of 100) stays whole.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
+        clippy::cast_sign_loss,
+        reason = "sample counts are far below 2^52, so the casts are exact"
     )]
     let rank = (p * n as f64 / 100.0).ceil() as usize;
     sorted[rank.clamp(1, n) - 1]
