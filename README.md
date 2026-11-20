@@ -5,6 +5,8 @@ started at once (by you, or by coding agents in several worktrees) overload a de
 time out for reasons that have nothing to do with the code. TaskSlash puts a small daemon in front of
 them: each command asks it for a slot, and it keeps the queue and the record of what ran.
 
+Every feature, with where it lives in the source: [FEATURES.md](FEATURES.md).
+
 This version runs each job in its own systemd scope, measures it, and records what it cost, and the
 daemon samples the whole machine once a second. From those records it estimates what each key will
 cost, and a job starts only when its estimate fits in the room the machine has left. A job that
