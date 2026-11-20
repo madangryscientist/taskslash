@@ -1,5 +1,5 @@
 //! The admission rule (spike 5.1), a pure function: may a waiting job start now, and if not, the
-//! first thing that holds it. Gates first, then the never-seen rule, then the three resources.
+//! first thing that holds it. Pressure gates first, then the never-seen rule, then the three resources.
 //! The order jobs are asked in, and the starvation guard, are `order`'s.
 
 use crate::Error;
@@ -113,7 +113,7 @@ pub enum Decision {
     Wait(Reason),
 }
 
-/// Why a job waits: the first thing that blocked it, gate before never-seen before resource.
+/// Why a job waits: the first thing that blocked it, pressure gate before never-seen before resource.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reason {
@@ -219,12 +219,12 @@ pub fn check(
     Decision::Start
 }
 
-/// The first gate that holds, if any.
+/// The first pressure gate that holds, if any.
 fn gate(m: &MachineSnapshot) -> Option<Reason> {
     gates(m).into_iter().next()
 }
 
-/// Every gate that holds, in the order `check` tries them.
+/// Every pressure gate that holds, in the order `check` tries them.
 pub(crate) fn gates(m: &MachineSnapshot) -> Vec<Reason> {
     let over = |gate, value: f64, limit| {
         (value > limit).then_some(Reason::Gate {

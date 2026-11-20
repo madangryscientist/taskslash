@@ -6,7 +6,7 @@
 //! then the lower id. The pass starts each job that fits and walks past one that does not
 //! (backfill), unless that one has waited more than 5 minutes: then nothing behind it starts.
 //! When no managed job runs, the first job the walk reaches that has waited 3 minutes on a CPU or
-//! I/O pressure gate or on the budget starts anyway (the wait cap); a gate stops the walk at the
+//! I/O pressure gate or on the budget starts anyway (the wait cap); a pressure gate stops the walk at the
 //! first job in line, so under one only that job can be capped. Memory and mount gates never are.
 
 use crate::admission::{self, Decision, Demand, Gate, Limits, Reason, Resource, Use};
@@ -155,7 +155,7 @@ pub fn plan(
 
 /// One pass: repeatedly takes the first job in order (shares as they stand, counting the jobs this
 /// pass has started), asks `admission::check` against the running set as it grows, and starts it
-/// or passes over it. A gate stops the walk for every job. A job that does not fit (a resource
+/// or passes over it. A pressure gate stops the walk for every job. A job that does not fit (a resource
 /// holds it, not the never-seen rule) and has waited more than `GUARD_AFTER` stops it too, and
 /// every job behind it waits on it. With nothing managed running, a job held past `WAIT_CAP` by
 /// a reason `cappable` allows starts anyway, and is reported in `capped`.

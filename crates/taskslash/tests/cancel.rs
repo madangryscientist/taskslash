@@ -1,6 +1,6 @@
 //! `taskslash cancel` through a real `taskslash daemon` and real `taskslash run`s, on whichever launch
 //! path the daemon chose (`scope` with a systemd user session, `plain` without). The fake machine
-//! keeps admission off this machine's load; a second never-seen job always waits behind the first.
+//! keeps admission off this machine's real pressure and use; a second never-seen job always waits behind the first.
 
 use serde_json::Value;
 use std::fs;

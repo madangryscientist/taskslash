@@ -5,7 +5,7 @@ use crate::protocol::Kind;
 use serde::{Deserialize, Serialize};
 
 const MIB: i64 = 1 << 20;
-/// A run taken while the machine's CPU `some avg10` was above this is starved (the gate of 5.1).
+/// A run taken while the machine's CPU `some avg10` was above this is starved (the pressure gate of 5.1).
 const CALM_CPU_SOME: f64 = 40.0;
 /// How many measured runs the memory figure looks at.
 const MEM_RUNS: usize = 5;
@@ -37,7 +37,7 @@ impl RunCost {
             && self.exit_code.is_some()
     }
 
-    /// Calm: measured, and the machine's CPU pressure during it is known and at most the gate.
+    /// Calm: measured, and the machine's CPU pressure during it is known and at most the pressure gate.
     fn calm(&self) -> bool {
         self.measured() && self.machine_cpu_some.is_some_and(|p| p <= CALM_CPU_SOME)
     }

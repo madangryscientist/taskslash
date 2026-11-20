@@ -238,16 +238,16 @@ Three resources count: CPU (threads), memory (MiB) and disk writes (MiB/s).
   30 one second samples. Machine CPU is `cpu.busy` times `cpu.threads`,
   memory `total_mib - available_mib`, writes the sum over the disks.
 - **A job fits** when, for every resource, committed plus its estimate is within the budget.
-- **Gates:** while any holds nothing starts (but see the wait cap below): CPU `some avg10` over 40, memory `some avg10` over 5,
+- **Pressure gates:** while any holds nothing starts (but see the wait cap below): CPU `some avg10` over 40, memory `some avg10` over 5,
   I/O `full avg10` over 5 or `some avg10` over 25, `available_mib` under 10% of `total_mib`, a
   watched mount over 90% used.
 - **Never seen:** a key is seen once one of its runs has finished. At most one job whose key was
   never seen runs at a time, unless the caller gave both `--cpu` and `--mem`.
 - **Too big to ever fit:** a job whose estimate alone is over a budget starts when no other job is
-  running and no gate holds.
+  running and no pressure gate holds.
 - **Wait cap:** when no managed job is running, a job that has waited 3 minutes on load TaskSlash
   does not manage starts anyway: on the CPU pressure gate, either I/O pressure gate, or a budget
-  that unmanaged use fills. Under a gate only the job first in line is looked at, so the cap starts
+  that unmanaged use fills. Under a pressure gate only the job first in line is looked at, so the cap starts
   nothing until that job has waited 3 minutes. Only one starts this way at a time, since once it
   runs a managed job does. The memory pressure, memory available and mount gates are never capped
   (running out of memory or disk does harm a wait avoids), so the cap applies only when none of
@@ -282,7 +282,7 @@ A job that fits starts. A job that does not is passed over and the pass goes on,
 smaller job may start (**backfill**), unless the one passed over waits for room and has waited more
 than 5 minutes:
 then nothing behind it starts until it has (**the starvation guard**), and those behind it wait
-with `behind <key> (job <n>), which has waited over 5 minutes and is not passed`. A gate holds every
+with `behind <key> (job <n>), which has waited over 5 minutes and is not passed`. A pressure gate holds every
 job. A higher class never stops, kills or freezes a running job; it is only first in line.
 
 **Weights.** On the scope path a job runs with `-p CPUWeight=<w>` from its class: `urgent` 400,
@@ -290,7 +290,7 @@ job. A higher class never stops, kills or freezes a running job; it is only firs
 running jobs; they do not admit. The plain path has no weight.
 
 A job that waits is told why on stderr when it is queued and every 15 seconds after, with its job
-number. The line names the first thing that holds it, checked in this order: a gate, the never-seen
+number. The line names the first thing that holds it, checked in this order: a pressure gate, the never-seen
 rule, a resource. A resource line names the three running jobs that hold the most of it, biggest
 first, and counts the rest. The first line of a job whose key has never run (and that was given
 neither `--cpu` nor `--mem`) also says what its kind is assumed to take:

@@ -1,5 +1,5 @@
 //! `taskslash events` and the `subscribe` stream through a real `taskslash daemon`, each test with
-//! its own socket, database and fake machine (so admission does not depend on this machine's load).
+//! its own socket, database and fake machine (so admission does not depend on this machine's real pressure and use).
 
 use serde_json::Value;
 use std::fs;
@@ -218,7 +218,7 @@ fn events_shows_a_job_queued_started_and_finished_and_exits_0_when_the_daemon_go
 
 #[test]
 fn a_job_that_leaves_the_queue_still_gets_its_finished() {
-    // CPU pressure over its gate holds every job in the queue.
+    // CPU pressure over its pressure gate holds every job in the queue.
     let daemon = Daemon::under(90.0);
     let (mut events, lines) = daemon.events(1);
     let mut held = daemon

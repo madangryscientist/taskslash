@@ -29,7 +29,7 @@ fn plain(wall: i64) -> RunCost {
 ///
 /// Measured: r0 r2 r3 r4 r6 r7 r8 r9 r11 (9). r1 and r10 are plain; r5 was dropped (no exit
 /// code), so its 999 MiB never counts. Calm: r0 r3 r6 r7 r8 r11 (6); r2 (75) and r9 (40.1) are
-/// starved, r4 had no sample, and r3 sits on the gate (40.0), which is still calm.
+/// starved, r4 had no sample, and r3 sits on the pressure gate (40.0), which is still calm.
 ///
 /// - Memory: newest 5 measured are r0 r2 r3 r4 r6 = 100 300 200 150 250 MiB; the max is 300
 ///   (r2, starved but honest), times 1.2 = 360 MiB. r7's 800 MiB is the 6th measured: out.
